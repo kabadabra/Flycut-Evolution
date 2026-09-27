@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>savePreference</key><integer>1</integer>
+<key>syncClippingsViaICloud</key><true/>
+<key>store</key><dict>
+<key>version</key><string>0.7</string>
+<key>rememberNum</key><integer>1</integer>
+<key>favoritesRememberNum</key><integer>1</integer>
+<key>jcList</key><array>
+<dict><key>Contents</key><string>Synthetic newest 🦊
+second line</string><key>Type</key><string>NSStringPboardType</string><key>Position</key><integer>700</integer><key>Timestamp</key><integer>0</integer></dict>
+<dict><key>Contents</key><string>Synthetic newest 🦊
+second line</string><key>Type</key><string>public.utf8-plain-text</string><key>Timestamp</key><integer>4294967296</integer></dict>
+</array>
+<key>favoritesList</key><array><dict><key>Contents</key><string>Synthetic favorite</string><key>Type</key><string>NSStringPboardType</string></dict></array>
+</dict></dict></plist>

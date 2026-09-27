@@ -1,0 +1,179 @@
+name: Build and Release
+
+# A validated tag push publishes. Manual dispatch is always a nonpublishing
+# signed/notarized dry run, including when the selected ref is a tag.
+# Credentials are documented in RELEASE_SETUP.md.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: xcode-27
+    env:
+      HAS_CERTIFICATES: ${{ secrets.CERTIFICATES_P12 != '' }}
+      HAS_NOTARY: ${{ secrets.NOTARY_KEY != '' && secrets.NOTARY_KEY_ID != '' && secrets.NOTARY_ISSUER_ID != '' }}
+      HAS_PROFILE: ${{ secrets.DEVELOPER_ID_PROFILE != '' }}
+      EXPECTED_TEAM_ID: M2L9SL9WCS
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0   # full history so changelog/version derivation works
+
+    - name: Require signing and notarization credentials
+      run: |
+        if [ "$HAS_CERTIFICATES" != 'true' ] || [ "$HAS_NOTARY" != 'true' ] || [ "$HAS_PROFILE" != 'true' ]; then
+          echo 'Developer ID, CloudKit profile, and notarization secrets are required for releases and dry runs.' >&2
+          exit 1
+        fi
+
+    - name: Set up Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '27.0'
+
+    - name: Extract version from tag
+      id: get_version
+      run: |
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must have the form vX.Y.Z: $TAG" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+        else
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/AppInfo.plist)
+        fi
+        printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+        echo "Building version: $VERSION"
+
+    - name: Import Developer ID certificate
+      if: env.HAS_CERTIFICATES == 'true'
+      env:
+        CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
+        CERTIFICATES_PASSWORD: ${{ secrets.CERTIFICATES_PASSWORD }}
+      run: |
+        set -euo pipefail
+        umask 077
+        KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+        CERTIFICATE_PATH="$RUNNER_TEMP/flycut-certificate.p12"
+        trap 'rm -f "$CERTIFICATE_PATH"' EXIT
+        KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        printf '%s' "$CERTIFICATES_P12" | base64 --decode > "$CERTIFICATE_PATH"
+        security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$CERTIFICATES_PASSWORD" \
+          -T /usr/bin/codesign -T /usr/bin/productsign
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)"/\1/')"
+        echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+        test -n "$IDENTITY"
+
+    - name: Test and bundle Swift app
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+      run: |
+        swift test
+        scripts/build-app.sh release
+        scripts/verify-app.sh 'build/Export/Flycut Evolution.app'
+
+    - name: Sign and notarize app
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+        NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+        NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+        NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        DEVELOPER_ID_PROFILE: ${{ secrets.DEVELOPER_ID_PROFILE }}
+      run: |
+        set -euo pipefail
+        umask 077
+        APP='build/Export/Flycut Evolution.app'
+        printf '%s' "$DEVELOPER_ID_PROFILE" | base64 --decode > "$RUNNER_TEMP/flycut-cloud.provisionprofile"
+        export SIGNING_KEYCHAIN="$RUNNER_TEMP/build.keychain"
+        scripts/sign-developer-id.sh "$APP" "$RUNNER_TEMP/flycut-cloud.provisionprofile"
+        trap 'rm -f "$RUNNER_TEMP/notary_key.p8"' EXIT
+        printf '%s' "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary_key.p8"
+        ditto -c -k --keepParent "$APP" build/Flycut.zip
+        xcrun notarytool submit build/Flycut.zip --key "$RUNNER_TEMP/notary_key.p8" \
+          --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait
+        xcrun stapler staple "$APP"
+        REQUIRE_DEVELOPER_ID=1 REQUIRE_NOTARIZATION=1 scripts/verify-app.sh "$APP"
+
+        mkdir -p build/dmg-staging
+        ditto "$APP" 'build/dmg-staging/Flycut Evolution.app'
+        ln -s /Applications build/dmg-staging/Applications
+        hdiutil create -volname 'Flycut Evolution' -srcfolder build/dmg-staging \
+          -ov -format UDZO build/Flycut-Evolution.dmg
+        codesign --force --keychain "$RUNNER_TEMP/build.keychain" --timestamp --sign "$SIGNING_IDENTITY" build/Flycut-Evolution.dmg
+        xcrun notarytool submit build/Flycut-Evolution.dmg --key "$RUNNER_TEMP/notary_key.p8" \
+          --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait
+        xcrun stapler staple build/Flycut-Evolution.dmg
+        xcrun stapler validate build/Flycut-Evolution.dmg
+        codesign --verify --strict --verbose=2 build/Flycut-Evolution.dmg
+        spctl -a -t open --context context:primary-signature -vv build/Flycut-Evolution.dmg
+
+    - name: Verify packaged app from DMG
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+      run: |
+        set -euo pipefail
+        MOUNT="$RUNNER_TEMP/flycut-verify"
+        mkdir -p "$MOUNT"
+        hdiutil attach build/Flycut-Evolution.dmg -readonly -nobrowse -mountpoint "$MOUNT"
+        trap 'hdiutil detach "$MOUNT"' EXIT
+        REQUIRE_DEVELOPER_ID=1 REQUIRE_NOTARIZATION=1 scripts/verify-app.sh "$MOUNT/Flycut Evolution.app"
+
+    - name: Clean up signing credentials
+      if: always()
+      run: |
+        rm -f "$RUNNER_TEMP/notary_key.p8" "$RUNNER_TEMP/flycut-certificate.p12" "$RUNNER_TEMP/flycut-cloud.provisionprofile"
+        security delete-keychain "$RUNNER_TEMP/build.keychain" 2>/dev/null || true
+
+    - name: Assemble release notes
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+      run: |
+        awk -v v="$VERSION" '
+          /^## / { if (grab) exit; grab=($2 == v); next }
+          grab { print }
+        ' CHANGELOG.md > release_notes.md
+        test -s release_notes.md
+        cat >> release_notes.md <<'NOTES'
+
+        Download Flycut-Evolution.dmg, quit Flycut 2.0, and drag Flycut Evolution.app to Applications.
+        Launch /Applications/Flycut Evolution.app explicitly and review migration before importing.
+        Only after checking imported history and settings, remove the old Flycut 2.0.app.
+        See the [upgrade guide](https://github.com/kabadabra/Flycut-Evolution#moving-to-flycut-evolution).
+        Requires macOS 14 or later; [Flycut 2.0](https://github.com/kabadabra/Flycut/releases/tag/v2.0.0) remains available for older Macs.
+        This app and DMG are Developer ID signed, notarized and stapled.
+        NOTES
+
+    - name: Upload DMG artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Flycut-Evolution-dmg
+        path: build/Flycut-Evolution.dmg
+
+    # Publish a GitHub Release only for tag pushes. A manual (workflow_dispatch)
+    # run builds + signs + notarizes as a dry run without publishing anything.
+    - name: Create GitHub Release
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: build/Flycut-Evolution.dmg
+        body_path: release_notes.md
+        name: Flycut Evolution
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
