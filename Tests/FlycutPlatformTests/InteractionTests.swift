@@ -113,7 +113,20 @@ import FlycutCore
         let fixture = PasteFixture(trusted: true)
         let result = await fixture.service.copyOrPaste("selected", mode: .paste, previousApp: 123)
         XCTAssertEqual(result, .pasted)
-        XCTAssertEqual(fixture.actions, ["write", "record:2", "activate:123", "wait", "front:123", "editable:123", "front:123", "key:47"])
+        XCTAssertEqual(fixture.actions, ["write", "record:2", "activate:123", "wait", "front:123", "front:123", "editable:123", "front:123", "key:47"])
+    }
+
+    func testPasteWaitsForDelayedWebComposerFocus() async {
+        let fixture = PasteFixture(trusted: true)
+        fixture.editable = false
+        var waits = 0
+        fixture.duringWait = {
+            waits += 1
+            if waits == 2 { fixture.editable = true }
+        }
+        let result = await fixture.service.copyOrPaste("selected", mode: .paste, previousApp: 123)
+        XCTAssertEqual(result, .pasted)
+        XCTAssertEqual(waits, 2)
     }
 
     func testPlainShortcutPastesTheCurrentClipboardText() async {
@@ -196,6 +209,26 @@ import FlycutCore
         XCTAssertTrue(fixture.actions.contains("editable:123"))
         XCTAssertFalse(fixture.actions.contains(where: { $0.hasPrefix("key:") }))
         XCTAssertEqual(fixture.actions.filter { $0 == "write" }.count, 1)
+    }
+
+    func testTeamsComposeShortcutRestoresEditableFocusBeforePaste() async {
+        let fixture = PasteFixture(trusted: true)
+        fixture.editable = false
+        fixture.canFocusComposer = true
+        let result = await fixture.service.copyOrPaste("selected", mode: .paste, previousApp: 123)
+        XCTAssertEqual(result, .pasted)
+        XCTAssertEqual(fixture.actions.filter { $0 == "focusComposer:123" }.count, 1)
+        XCTAssertEqual(fixture.actions.last, "key:47")
+    }
+
+    func testTeamsComposeShortcutMustProduceEditableFocus() async {
+        let fixture = PasteFixture(trusted: true)
+        fixture.editable = false
+        fixture.canFocusComposer = true
+        fixture.focusComposerSucceeds = false
+        let result = await fixture.service.copyOrPaste("selected", mode: .paste, previousApp: 123)
+        XCTAssertEqual(result, .copiedNoEditableTarget)
+        XCTAssertFalse(fixture.actions.contains("key:47"))
     }
 
     func testFieldBecomingNoneditableDuringFocusWaitDoesNotPaste() async {
@@ -352,6 +385,8 @@ import FlycutCore
     var count = 2
     var frontmost = true
     var editable = true
+    var canFocusComposer = false
+    var focusComposerSucceeds = true
     var key: UInt16? = 47
     var trusted: Bool
     var duringWait: @MainActor () async -> Void = {}
@@ -365,6 +400,11 @@ import FlycutCore
         waitForFocus: { [unowned self] in actions.append("wait"); await duringWait() },
         isFrontmost: { [unowned self] pid in actions.append("front:\(pid)"); return frontmost },
         isEditableTarget: { [unowned self] pid in actions.append("editable:\(pid)"); duringEditableCheck(); return editable },
+        focusComposer: { [unowned self] pid in
+            actions.append("focusComposer:\(pid)")
+            if canFocusComposer && focusComposerSucceeds { editable = true }
+            return canFocusComposer
+        },
         pasteKeyCode: { [unowned self] in key },
         sendPaste: { [unowned self] key in actions.append("key:\(key)"); return true },
         sendPlainText: { [unowned self] text, pid in insertedText = text; actions.append("insert:\(pid)"); return true }

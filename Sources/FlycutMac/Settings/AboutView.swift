@@ -7,9 +7,9 @@ struct AboutView: View {
             Text("Version \(FlycutVersion.current)").foregroundStyle(.secondary)
             Text("Maintained by Emerging Dynamics")
             Text("A fork of TermiT/Flycut and Jumpcut\nFree and open source · MIT license").multilineTextAlignment(.center)
-            Link("Flycut source and contributors", destination: URL(string: "https://github.com/kabadabra/Flycut")!)
+            Link("Flycut Evolution source and contributors", destination: URL(string: "https://github.com/kabadabra/Flycut-Evolution")!)
             Link("Upstream TermiT/Flycut", destination: URL(string: "https://github.com/TermiT/Flycut")!)
-            Text("Cloud sync is not available in this release.").foregroundStyle(.secondary)
+            Text("Optional Cloud Sync is available in Settings.").foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

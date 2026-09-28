@@ -39,6 +39,32 @@ import FlycutCore
         XCTAssertEqual(actions, [.activatePlain])
     }
 
+    func testPresentationReturnsToNewestRecentClip() {
+        let model = PaletteModel()
+        let newest = Clip(id: UUID(), text: "newest", pasteboardType: "text", sourceAppName: nil,
+                          sourceBundleURL: nil, capturedAt: nil, collection: .recent, order: 0)
+        let older = Clip(id: UUID(), text: "older", pasteboardType: "text", sourceAppName: nil,
+                         sourceBundleURL: nil, capturedAt: nil, collection: .recent, order: 1)
+        model.selection.update(.init(recent: [newest, older], favorites: []))
+        model.selection.query = "older"
+        model.preparePresentation()
+        XCTAssertEqual(model.selection.query, "")
+        XCTAssertEqual(model.selection.selectedID, newest.id)
+    }
+
+    func testContextCopyTargetsClickedClip() {
+        let model = PaletteModel()
+        let newest = Clip(id: UUID(), text: "newest", pasteboardType: "text", sourceAppName: nil,
+                          sourceBundleURL: nil, capturedAt: nil, collection: .recent, order: 0)
+        let older = Clip(id: UUID(), text: "older", pasteboardType: "text", sourceAppName: nil,
+                         sourceBundleURL: nil, capturedAt: nil, collection: .recent, order: 1)
+        model.selection.update(.init(recent: [newest, older], favorites: []))
+        var commands: [PaletteCommand] = []
+        model.perform = { commands.append($0) }
+        model.copyToTop(older.id)
+        XCTAssertEqual(commands, [.copyToTop(older.id)])
+    }
+
     func testImmediateRowSurfaceReportsHoverWithoutClicking() {
         var hovered: [Bool] = []
         var clicks = 0

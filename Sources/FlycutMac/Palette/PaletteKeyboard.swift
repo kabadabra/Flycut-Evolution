@@ -1,12 +1,7 @@
 import AppKit
 import FlycutCore
 
-final class PalettePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-}
-
-/// Local monitor only handles events in the palette's own windows.
+/// Local monitor only handles events in the palette's own window.
 @MainActor final class PaletteKeyboard {
     private var monitor: Any?
     init(model: PaletteModel, owns: @escaping (NSWindow?) -> Bool) {

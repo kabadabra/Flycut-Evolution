@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1 (2026-09-28)
+
+Flycut Evolution 1.0.1 improves paste reliability and keeps the menu bar palette in place. It supports macOS 14 or later on Apple Silicon and Intel Macs.
+
+- Use Microsoft Teams' compose shortcut to restore chat focus before pasting when no editable field is focused, and keep the palette attached to the menu bar after paste failures.
+- Correct About screen Cloud Sync availability and source link.
+- Open the palette at the newest recent clipping and add a right-click action to copy an item and move it to the top.
+- Consolidate mirrored Universal Control clippings while retaining unique clips and the original source when available.
+
 ## 1.0.0 (2026-09-27)
 
 Flycut Evolution 1.0.0 is a complete Swift rewrite of the free, MIT licensed clipboard manager, maintained by Emerging Dynamics. It supports macOS 14 or later on Apple Silicon and Intel. [Flycut 2.0 remains available for older Macs](https://github.com/kabadabra/Flycut/releases/tag/v2.0.0).

@@ -287,3 +287,9 @@ The user reported that the alternate Appearance choices, especially Scissors, lo
 The 1.0.0 installer was signed and notarized separately, stapled, accepted by Gatekeeper, mounted read-only, and its contained universal app passed the strict Developer ID, CloudKit profile, notarization, and version checks. The installed app is the same signed build used to make this installer.
 
 The first GitHub Actions dry run built on a separate macOS 27 runner and exposed a test-only assumption: that runner's SF Symbol catalog gives Clipboard and Text slightly different intrinsic widths, while their explicitly configured point sizes and weights match. The focused test now checks compact bounds instead of exact pixel geometry. The complete local suite passed again with 164 tests and zero failures; the runner must pass this revised test before tagging the release.
+
+### Version 1.0.1 local checks (2026-09-28)
+
+The local 1.0.1 candidate includes a Teams compose-focus fallback, an anchored menu bar palette, scroll reset to the newest clip, a right-click Copy to Top action, and Universal Control duplicate consolidation. The user confirmed that pasting into the Microsoft Teams chat now works. The Teams focus shortcut was separately observed to move focus from a chat message to its composer without entering text. Automated tests cover the focus fallback, history normalization, and row action; the full Swift suite passed (170 tests, zero failures).
+
+The universal app was signed with the Developer ID and CloudKit profile, verified, backed up, and installed at `~/Applications/Flycut Evolution.app`. The running executable path and saved SQLite integrity were checked. This local build has not been notarized; the GitHub release workflow must sign, notarize, staple, and verify the app and DMG before publication. The user authorized commit, push, and release after confirming Teams paste.

@@ -9,14 +9,14 @@ Flycut Evolution is a free, open source clipboard manager for Mac. It keeps text
 - **Find and paste quickly.** Open the menu bar palette, search Recents or Favorites, then single-click a clipping or press Return. Flycut pastes into the field you were using; when there is no editable field, it puts the clipping on the clipboard. The palette has a taller, compact list and shows the source app without a changing timestamp.
 - **Keep or remove formatting.** New text copies with RTF keep their formatting for normal paste. Press **Shift–Command–V** to paste the current clipboard as plain text immediately, or use the **Aa** button beside a formatted clipping to paste that item without formatting. The global shortcut is configurable.
 - **Preview the full copy.** Rows show one plain-text line with an ellipsis. Hover to highlight a row and see its full text and saved formatting. Turn the hover preview off in Appearance settings if you prefer.
-- **Keep history tidy.** Copying the same text again from the same app moves that clipping to the top rather than adding a duplicate. Favorite important clippings, pause capture, set history limits, and export text. Local history is stored privately in SQLite.
+- **Keep history tidy.** Copying the same text again from the same app moves that clipping to the top rather than adding a duplicate. Flycut also consolidates mirrored Universal Control copies, and a row's right-click menu can copy it back to the top. Favorite important clippings, pause capture, set history limits, and export text. Local history is stored privately in SQLite.
 - **Sync between your Macs.** Optional Cloud Sync shares history, favorites, and available formatting through your private iCloud database. Enable it separately on each Mac signed into the same Apple Account. Flycut asks before uploading existing history; device settings stay local.
 - **Control privacy and appearance.** Skip password fields, sensitive clipboard types, or chosen text lengths; choose light, dark, or system appearance; pick a Clipboard, Scissors, or Text menu bar icon; and adjust palette size and preview behavior. Flycut can open at login and remember a paused state.
 - **Bring your older history.** A reviewed importer can copy saved clippings and settings from earlier Flycut versions. It makes a private backup and leaves the old source untouched. Fresh installs with no old source skip the importer.
 
 ## Requirements and installation
 
-Flycut Evolution 1.0.0 requires **macOS 14 or later** on an **Apple Silicon or Intel Mac**. The release contains both architectures and has been tested on macOS 27. Cloud Sync requires iCloud and Macs signed into the same Apple Account.
+Flycut Evolution 1.0.1 requires **macOS 14 or later** on an **Apple Silicon or Intel Mac**. The release contains both architectures and has been tested on macOS 27. Cloud Sync requires iCloud and Macs signed into the same Apple Account.
 
 1. Download **Flycut-Evolution.dmg** from the [latest release](https://github.com/kabadabra/Flycut-Evolution/releases/latest), open it, and drag **Flycut Evolution.app** to Applications. The release app and disk image are Developer ID signed and notarized by Apple.
 2. Open the app and allow clipboard access if macOS asks. To paste automatically into other apps, grant Flycut Evolution Accessibility access in **System Settings → Privacy & Security → Accessibility**. Without it, clicking a clipping still copies it for manual paste.
@@ -40,7 +40,7 @@ scripts/build-app.sh release
 scripts/verify-app.sh 'build/Export/Flycut Evolution.app'
 ```
 
-The preview has a separate `com.edynamics.flycut.preview` identity and data. Local bundles are ad hoc signed. The production bundle is `build/Export/Flycut Evolution.app`, identity `com.edynamics.flycut`, version `1.0.0`. Cloud Sync requires the production app to be signed with the Flycut CloudKit Developer ID profile. Opening it can start production migration; use the preview for routine development. See [developer notes](docs/DEVELOPING.md) and [release setup](RELEASE_SETUP.md).
+The preview has a separate `com.edynamics.flycut.preview` identity and data. Local bundles are ad hoc signed. The production bundle is `build/Export/Flycut Evolution.app`, identity `com.edynamics.flycut`, version `1.0.1`. Cloud Sync requires the production app to be signed with the Flycut CloudKit Developer ID profile. Opening it can start production migration; use the preview for routine development. See [developer notes](docs/DEVELOPING.md) and [release setup](RELEASE_SETUP.md).
 
 ## Moving to Flycut Evolution
 

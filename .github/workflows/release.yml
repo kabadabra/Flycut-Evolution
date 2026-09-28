@@ -150,12 +150,12 @@ jobs:
         test -s release_notes.md
         cat >> release_notes.md <<'NOTES'
 
-        Download Flycut-Evolution.dmg, quit Flycut 2.0, and drag Flycut Evolution.app to Applications.
-        Launch /Applications/Flycut Evolution.app explicitly and review migration before importing.
-        Only after checking imported history and settings, remove the old Flycut 2.0.app.
+        Download Flycut-Evolution.dmg, quit any running Flycut Evolution, and drag Flycut Evolution.app to Applications.
+        If moving from Flycut 2.0, quit it before launching Flycut Evolution, review migration before importing, and verify history and settings before removing the old app.
         See the [upgrade guide](https://github.com/kabadabra/Flycut-Evolution#moving-to-flycut-evolution).
         Requires macOS 14 or later; [Flycut 2.0](https://github.com/kabadabra/Flycut/releases/tag/v2.0.0) remains available for older Macs.
         This app and DMG are Developer ID signed, notarized and stapled.
+        Flycut Evolution is maintained by Emerging Dynamics and is based on TermiT/Flycut and Jumpcut. See the [contributors](https://github.com/kabadabra/Flycut-Evolution/graphs/contributors) and [acknowledgements](https://github.com/kabadabra/Flycut-Evolution/blob/main/acknowledgements.txt).
         NOTES
 
     - name: Upload DMG artifact
@@ -172,7 +172,7 @@ jobs:
       with:
         files: build/Flycut-Evolution.dmg
         body_path: release_notes.md
-        name: Flycut Evolution
+        name: Flycut Evolution ${{ steps.get_version.outputs.version }}
         draft: false
         prerelease: false
       env:

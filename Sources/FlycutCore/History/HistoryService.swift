@@ -32,6 +32,10 @@ public actor HistoryService {
         let capacity = recentCapacity
         let archive = archiveRecents ? archive : nil
         return try await repository.update { current in
+            if clip.isUniversalControlSource && current.recent.contains(where: { $0.text == clip.text }) { return }
+            if !clip.isUniversalControlSource {
+                current.recent.removeAll { $0.isUniversalControlSource && $0.text == clip.text }
+            }
             let key = DuplicateKey(clip)
             let retainedID = current.recent.first(where: { DuplicateKey($0) == key })?.id ?? clip.id
             current.recent.removeAll { DuplicateKey($0) == key }
@@ -49,8 +53,12 @@ public actor HistoryService {
     @discardableResult
     public func normalizeRecents(backupTo backupURL: URL? = nil) async throws -> HistorySnapshot {
         try await repository.update { current in
+            let otherSourceTexts = Set(current.recent.filter { !$0.isUniversalControlSource }.map(\.text))
             var seen = Set<DuplicateKey>()
-            let retained = current.recent.filter { seen.insert(DuplicateKey($0)).inserted }
+            let retained = current.recent.filter {
+                guard !$0.isUniversalControlSource || !otherSourceTexts.contains($0.text) else { return false }
+                return seen.insert(DuplicateKey($0)).inserted
+            }
             guard retained.count != current.recent.count else { return }
             if let backupURL { try Self.writePrivateBackup(current, to: backupURL) }
             current.recent = retained
@@ -121,5 +129,11 @@ public actor HistoryService {
             current.recent = [merged]
         }
         return snapshot.recent.first
+    }
+}
+
+private extension Clip {
+    var isUniversalControlSource: Bool {
+        sourceAppName == "Universal Control" || sourceBundleURL?.contains("/UniversalControl.app/") == true
     }
 }

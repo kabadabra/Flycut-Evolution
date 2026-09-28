@@ -55,11 +55,6 @@ import FlycutCore
         XCTAssertEqual(PalettePresentation.size(settings, available: NSSize(width: 800, height: 600)), NSSize(width: 768, height: 568))
         XCTAssertEqual(PalettePresentation.size(settings, available: NSSize(width: 400, height: 300)), NSSize(width: 368, height: 268))
     }
-    func testResizingNearScreenEdgeKeepsEntirePanelVisible() {
-        let screen = NSRect(x: 1000, y: 100, width: 1000, height: 700)
-        let resized = NSRect(x: 1850, y: 650, width: 650, height: 500)
-        XCTAssertEqual(PalettePresentation.constrain(resized, to: screen), NSRect(x: 1334, y: 284, width: 650, height: 500))
-    }
     func testAnimationRequiresOptInAndRespectsReduceMotion() {
         var settings = FlycutSettings()
         XCTAssertFalse(PalettePresentation.animates(settings, reduceMotion: false))

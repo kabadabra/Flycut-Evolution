@@ -33,7 +33,7 @@ public struct PaletteSelection: Sendable {
 }
 
 public enum PaletteCommand: Equatable, Sendable {
-    case activate, activatePlain, dismiss, favorite, switchCollection, exportSelected, exportAll, delete, next, previous, digit(Int)
+    case activate, activatePlain, dismiss, favorite, switchCollection, exportSelected, exportAll, delete, next, previous, digit(Int), copyToTop(UUID)
     public static func resolve(keyCode: UInt16, key: String, editingSearch: Bool) -> Self? {
         if keyCode == 53 { return .dismiss }
         if keyCode == 36 || keyCode == 76 { return .activate }

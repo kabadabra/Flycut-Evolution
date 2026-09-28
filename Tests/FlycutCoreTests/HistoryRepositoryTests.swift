@@ -242,6 +242,35 @@ final class HistoryRepositoryTests: XCTestCase {
         XCTAssertEqual(result.recent.map(\.id), [second.id, first.id])
     }
 
+    func testUniversalControlMirrorKeepsOriginalSource() async throws {
+        let store = try repository()
+        let service = HistoryService(repository: store)
+        let teams = clip("shared")
+        let other = clip("intervening")
+        let mirror = Clip(id: UUID(), text: "shared", pasteboardType: "text", sourceAppName: "Universal Control",
+                          sourceBundleURL: "file:///System/Library/CoreServices/UniversalControl.app/", capturedAt: Date(),
+                          collection: .recent, order: 0)
+        _ = try await service.capture(teams)
+        _ = try await service.capture(other)
+        let snapshot = try await service.capture(mirror)
+        XCTAssertEqual(snapshot.recent.map(\.id), [other.id, teams.id])
+    }
+
+    func testNormalizingExistingUniversalControlMirrorRemovesOnlyMirror() async throws {
+        let store = try repository()
+        let service = HistoryService(repository: store)
+        let teams = clip("shared")
+        let mirror = Clip(id: UUID(), text: "shared", pasteboardType: "text", sourceAppName: "Universal Control",
+                          sourceBundleURL: "file:///System/Library/CoreServices/UniversalControl.app/", capturedAt: Date(),
+                          collection: .recent, order: 0)
+        let unique = Clip(id: UUID(), text: "unique", pasteboardType: "text", sourceAppName: "Universal Control",
+                          sourceBundleURL: "file:///System/Library/CoreServices/UniversalControl.app/", capturedAt: Date(),
+                          collection: .recent, order: 0)
+        try await store.replaceAll(.init(recent: [mirror, teams, unique], favorites: []))
+        let snapshot = try await service.normalizeRecents()
+        XCTAssertEqual(snapshot.recent.map(\.id), [teams.id, unique.id])
+    }
+
     func testNormalizingExistingDuplicatesKeepsNewestAndFavorites() async throws {
         let store = try repository()
         let service = HistoryService(repository: store)

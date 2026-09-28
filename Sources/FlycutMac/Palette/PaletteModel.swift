@@ -49,6 +49,14 @@ import FlycutCore
         selection.select(id)
         perform(.activatePlain)
     }
+    func preparePresentation() {
+        selection.query = ""
+        selection.collection = .recent
+        selection.home()
+        showAll = false
+        presentation = UUID()
+    }
+    func copyToTop(_ id: UUID) { perform(.copyToTop(id)) }
     func rowHovered(_ id: UUID, inside: Bool) {
         if inside { hoveredClipID = id }
         else if hoveredClipID == id { hoveredClipID = nil }

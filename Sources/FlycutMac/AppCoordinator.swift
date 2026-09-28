@@ -142,7 +142,7 @@ import FlycutPlatform
         }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        shell?.showPanel()
+        shell?.showPalette()
         return false
     }
 
@@ -196,8 +196,7 @@ import FlycutPlatform
         pasteTask?.cancel()
         pasteTargets.observeActivation(processID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
         model.needsAccessibility = !accessibility.isTrusted
-        model.showAll = false
-        model.presentation = UUID()
+        model.preparePresentation()
     }
     private func perform(_ command: PaletteCommand) {
         switch command {
@@ -207,6 +206,9 @@ import FlycutPlatform
         case .dismiss: shell.dismiss()
         case .activate: copyOrPaste(.paste, plain: false)
         case .activatePlain: copyOrPaste(.paste, plain: true)
+        case .copyToTop(let id):
+            model.selection.select(id)
+            copyOrPaste(.copy, plain: false, forceMoveToTop: true)
         case .favorite:
             guard let clip = model.selection.selected, clip.collection == .recent else { return }
             enqueue { _ = try await $0.history.favorite(id: clip.id) }
@@ -218,7 +220,7 @@ import FlycutPlatform
         case .exportAll: export(model.selection.collection == .recent ? snapshot.recent : snapshot.favorites)
         }
     }
-    private func copyOrPaste(_ mode: PasteMode, plain: Bool) {
+    private func copyOrPaste(_ mode: PasteMode, plain: Bool, forceMoveToTop: Bool = false) {
         guard let clip = model.selection.selected else { return }
         pasteTask?.cancel()
         pasteTargets.observeActivation(processID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
@@ -231,7 +233,7 @@ import FlycutPlatform
             let result = await paste.copyOrPaste(clip, plain: plain, mode: mode, previousApp: target)
             guard !Task.isCancelled else { return }
             reportPasteResult(result)
-            if settings.pasteMovesToTop, result != .writeFailed {
+            if (forceMoveToTop || settings.pasteMovesToTop), result != .writeFailed {
                 enqueue { _ = try await $0.history.moveToTop(id: clip.id) }
             }
         }
@@ -285,7 +287,7 @@ import FlycutPlatform
             failed = true
         }
         if failed {
-            if showPanelOnFailure { shell.showPanel() }
+            if showPanelOnFailure { shell.showPalette() }
             else { shell.indicateShortcutFailure(model.message ?? "Could not paste.") }
         } else if !showPanelOnFailure { shell.clearShortcutFeedback() }
     }
@@ -570,7 +572,7 @@ import FlycutPlatform
             } catch {
                 terminating = false
                 model.message = "History could not be saved. Quit cancelled."
-                shell.showPanel()
+                shell.showPalette()
                 sender.reply(toApplicationShouldTerminate: false)
                 monitor.start()
                 if let registeredHotkey { try? hotkey.register(registeredHotkey) }

@@ -18,6 +18,7 @@ public enum PasteResult: Equatable, Sendable {
     public var waitForFocus: () async -> Void
     public var isFrontmost: (pid_t) -> Bool
     public var isEditableTarget: (pid_t) -> Bool
+    public var focusComposer: (pid_t) -> Bool
     public var pasteKeyCode: () -> UInt16?
     public var sendPaste: (UInt16) -> Bool
     public var sendPlainText: (String, pid_t) -> Bool
@@ -25,6 +26,7 @@ public enum PasteResult: Equatable, Sendable {
     public init(write: @escaping (String) -> Int?, changeCount: @escaping () -> Int, isTrusted: @escaping () -> Bool,
                 activate: @escaping (pid_t) -> Bool, waitForFocus: @escaping () async -> Void,
                 isFrontmost: @escaping (pid_t) -> Bool, isEditableTarget: @escaping (pid_t) -> Bool,
+                focusComposer: @escaping (pid_t) -> Bool = { _ in false },
                 pasteKeyCode: @escaping () -> UInt16?,
                 sendPaste: @escaping (UInt16) -> Bool,
                 sendPlainText: @escaping (String, pid_t) -> Bool = { _, _ in false },
@@ -32,6 +34,7 @@ public enum PasteResult: Equatable, Sendable {
         self.write = write; self.changeCount = changeCount; self.isTrusted = isTrusted; self.activate = activate
         self.writeFormatted = writeFormatted ?? { text, _ in write(text) }
         self.waitForFocus = waitForFocus; self.isFrontmost = isFrontmost; self.isEditableTarget = isEditableTarget
+        self.focusComposer = focusComposer
         self.pasteKeyCode = pasteKeyCode; self.sendPaste = sendPaste; self.sendPlainText = sendPlainText
     }
 
@@ -49,14 +52,12 @@ public enum PasteResult: Equatable, Sendable {
             try? await Task.sleep(for: .milliseconds(150))
         }, isFrontmost: { NSWorkspace.shared.frontmostApplication?.processIdentifier == $0 },
         isEditableTarget: { FocusedEditableTarget.isEditable(processID: $0) },
-        pasteKeyCode: { KeyboardLayout().keyCode(for: "v") }, sendPaste: { code in
-            guard let source = CGEventSource(stateID: .privateState),
-                  let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { return false }
-            down.flags = .maskCommand; up.flags = .maskCommand
-            down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
-            return true
-        }, sendPlainText: { text, pid in
+        focusComposer: { pid in
+            guard FocusedEditableTarget.hasTeamsComposer(processID: pid),
+                  let code = KeyboardLayout().keyCode(for: "r") else { return false }
+            return postCommand(code)
+        }, pasteKeyCode: { KeyboardLayout().keyCode(for: "v") }, sendPaste: { postCommand($0) },
+        sendPlainText: { text, pid in
             FocusedEditableTarget.insertPlainText(text, processID: pid)
         }, writeFormatted: { text, rtf in
             let board = NSPasteboard.general
@@ -65,6 +66,15 @@ public enum PasteResult: Equatable, Sendable {
             _ = board.setData(rtf, forType: .rtf)
             return board.changeCount
         })
+    }
+
+    private static func postCommand(_ code: UInt16) -> Bool {
+        guard let source = CGEventSource(stateID: .privateState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { return false }
+        down.flags = .maskCommand; up.flags = .maskCommand
+        down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
+        return true
     }
 }
 
@@ -95,7 +105,12 @@ public enum PasteResult: Equatable, Sendable {
         guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
               pasteboard.changeCount == sourceCount else { return .pasteUnavailable }
         guard client.isTrusted() else { return .pasteNeedsAccessibility }
-        guard client.isEditableTarget(pid) else { return .noEditableTarget }
+        if !client.isEditableTarget(pid) {
+            guard client.focusComposer(pid) else { return .noEditableTarget }
+            await client.waitForFocus()
+            guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
+                  pasteboard.changeCount == sourceCount, client.isEditableTarget(pid) else { return .noEditableTarget }
+        }
         guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
               pasteboard.changeCount == sourceCount else { return .pasteUnavailable }
         guard client.isTrusted() else { return .pasteNeedsAccessibility }
@@ -129,7 +144,20 @@ public enum PasteResult: Equatable, Sendable {
         guard let code = client.pasteKeyCode() else { return .copiedPasteUnavailable }
         // Another process can replace the shared clipboard while focus is settling.
         guard client.changeCount() == count else { return .copiedPasteUnavailable }
-        guard client.isEditableTarget(pid) else { return .copiedNoEditableTarget }
+        var editable = false
+        for attempt in 0..<3 {
+            guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
+                  client.changeCount() == count else { return .copiedPasteUnavailable }
+            if client.isEditableTarget(pid) { editable = true; break }
+            if attempt < 2 { await client.waitForFocus() }
+        }
+        if !editable, client.focusComposer(pid) {
+            await client.waitForFocus()
+            guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
+                  client.changeCount() == count else { return .copiedPasteUnavailable }
+            editable = client.isEditableTarget(pid)
+        }
+        guard editable else { return .copiedNoEditableTarget }
         // The Accessibility query crosses a process boundary; focus and clipboard can change while it runs.
         guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
               client.changeCount() == count else { return .copiedPasteUnavailable }

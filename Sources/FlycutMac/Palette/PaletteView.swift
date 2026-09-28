@@ -70,6 +70,7 @@ struct PaletteView: View {
                             }
                             .accessibilityAction(named: "Activate Clipping") { model.selection.select(clip.id); model.activateSelection() }
                             .contextMenu {
+                                Button("Copy and Move to Top") { model.copyToTop(clip.id) }
                                 Button("Move to Favorites") { model.selection.select(clip.id); model.perform(.favorite) }
                                     .disabled(clip.collection == .favorite)
                                 Button("Export…") { model.selection.select(clip.id); model.perform(.exportSelected) }
@@ -78,8 +79,8 @@ struct PaletteView: View {
                         }
                     }
                 }.onChange(of: model.selection.selectedID) { id in if let id { proxy.scrollTo(id) } }
-                .onChange(of: model.presentation) { _ in if let id = model.selection.selectedID { proxy.scrollTo(id) } }
-                .onAppear { if let id = model.selection.selectedID { proxy.scrollTo(id) } }
+                .onChange(of: model.presentation) { _ in if let id = model.visibleClips.first?.id { proxy.scrollTo(id, anchor: .top) } }
+                .onAppear { if let id = model.visibleClips.first?.id { proxy.scrollTo(id, anchor: .top) } }
             }
             if model.visibleClips.count < model.selection.clips.count {
                 Button("Show All \(model.selection.clips.count) Clippings") { model.showAll = true }
