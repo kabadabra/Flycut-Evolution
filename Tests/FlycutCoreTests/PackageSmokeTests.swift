@@ -17,7 +17,7 @@ final class PackageSmokeTests: XCTestCase {
         XCTAssertEqual(clip.text, "exact text\n")
         XCTAssertEqual(clip.collection, .recent)
         XCTAssertEqual(clip.order, 3)
-        XCTAssertEqual(FlycutVersion.current, "1.0.1")
+        XCTAssertEqual(FlycutVersion.current, "1.0.2")
     }
 
     func testFavoriteClipKeepsItsCollectionAndOrder() {

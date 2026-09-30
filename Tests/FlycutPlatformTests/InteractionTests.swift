@@ -129,6 +129,21 @@ import FlycutCore
         XCTAssertEqual(waits, 2)
     }
 
+    func testPlainShortcutUsesNormalPasteWhenAccessibilityClaimsInsertionSucceeded() async {
+        let fixture = PasteFixture(trusted: true)
+        fixture.pasteboard.result = .text("Synthetic Teams source")
+        // Teams reports AX insertion success without updating its web editor.
+        fixture.insertionSucceeds = true
+
+        let result = await fixture.service.pasteCurrentClipboardAsPlainText(previousApp: 123)
+
+        XCTAssertEqual(result, .pasted)
+        XCTAssertEqual(fixture.writtenText, "Synthetic Teams source")
+        XCTAssertEqual(fixture.actions.filter { $0 == "key:47" }.count, 1)
+        XCTAssertNil(fixture.insertedText)
+        XCTAssertTrue(fixture.actions.contains("record:2"))
+    }
+
     func testPlainShortcutPastesTheCurrentClipboardText() async {
         let fixture = PasteFixture(trusted: true)
         fixture.pasteboard.result = .text("Synthetic formatted source")
@@ -138,32 +153,116 @@ import FlycutCore
 
         XCTAssertEqual(result, .pasted)
         XCTAssertEqual(fixture.pasteboard.reads, 1)
-        XCTAssertNil(fixture.writtenText)
-        XCTAssertEqual(fixture.insertedText, "Synthetic formatted source")
+        XCTAssertEqual(fixture.writtenText, "Synthetic formatted source")
+        XCTAssertNil(fixture.insertedText)
+        XCTAssertTrue(fixture.actions.contains("key:47"))
         XCTAssertEqual(fixture.pasteboard.changeCount, 8)
     }
 
-    func testPlainShortcutKeepsNewCopyAvailableForHistoryCapture() async {
+    func testPlainShortcutUsesNormalPasteWhenEditorRejectsAccessibilityInsertion() async {
+        let fixture = PasteFixture(trusted: true)
+        fixture.pasteboard.result = .text("Synthetic fallback")
+        fixture.insertionSucceeds = false
+        let result = await fixture.service.pasteCurrentClipboardAsPlainText(previousApp: 123)
+        XCTAssertEqual(result, .pasted)
+        XCTAssertEqual(fixture.writtenText, "Synthetic fallback")
+        XCTAssertEqual(fixture.actions.filter { $0 == "key:47" }.count, 1)
+        XCTAssertTrue(fixture.actions.contains("record:2"))
+    }
+
+    func testPlainShortcutWorksWhenEditorDoesNotExposeEditableAccessibilityRole() async {
+        let fixture = PasteFixture(trusted: true)
+        fixture.pasteboard.result = .text("Synthetic web editor")
+        fixture.editable = false
+        let result = await fixture.service.pasteCurrentClipboardAsPlainText(previousApp: 123)
+        XCTAssertEqual(result, .pasted)
+        XCTAssertEqual(fixture.writtenText, "Synthetic web editor")
+        XCTAssertTrue(fixture.actions.contains("key:47"))
+        XCTAssertFalse(fixture.actions.contains("focusComposer:123"))
+    }
+
+    func testPlainShortcutDoesNotWriteOrPasteAfterDestinationOrClipboardChanges() async {
+        for change in ["focus", "clipboard", "trust"] {
+            let fixture = PasteFixture(trusted: true)
+            fixture.pasteboard.result = .text("Synthetic fallback")
+            fixture.insertionSucceeds = false
+            fixture.duringWait = {
+                switch change {
+                case "focus": fixture.frontmost = false
+                case "clipboard": fixture.pasteboard.changeCount += 1
+                default: fixture.trusted = false
+                }
+            }
+            let result = await fixture.service.pasteCurrentClipboardAsPlainText(previousApp: 123)
+            XCTAssertEqual(result, change == "trust" ? .pasteNeedsAccessibility : .pasteUnavailable)
+            XCTAssertNil(fixture.writtenText)
+            XCTAssertFalse(fixture.actions.contains("key:47"))
+        }
+    }
+
+    func testPlainShortcutWithoutPasteKeyLeavesClipboardUntouched() async {
+        let fixture = PasteFixture(trusted: true)
+        fixture.pasteboard.result = .text("Synthetic fallback")
+        fixture.insertionSucceeds = false
+        fixture.key = nil
+        let result = await fixture.service.pasteCurrentClipboardAsPlainText(previousApp: 123)
+        XCTAssertEqual(result, .pasteUnavailable)
+        XCTAssertNil(fixture.writtenText)
+    }
+
+    func testCancelledShortcutDoesNotInsertOrRewriteClipboard() async {
+        let fixture = PasteFixture(trusted: true)
+        fixture.pasteboard.result = .text("Synthetic cancelled")
+        let gate = FocusGate()
+        fixture.duringWait = { await gate.wait() }
+        let task = Task { await fixture.service.pasteCurrentClipboardAsPlainText(previousApp: 123) }
+        await gate.waitUntilSuspended()
+        task.cancel()
+        gate.resume()
+        let result = await task.value
+        XCTAssertEqual(result, .pasteUnavailable)
+        XCTAssertNil(fixture.insertedText)
+        XCTAssertNil(fixture.writtenText)
+    }
+
+    func testPlainShortcutKeepsNewFormattedCopyInHistoryBeforeStrippingClipboard() async throws {
         let board = InteractionBoard()
         board.changeCount = 1
-        var captured = 0
+        var captured: [Clip] = []
         let monitor = ClipboardMonitor(pasteboard: board, settings: { FlycutSettings() },
-                                       onClip: { _ in captured += 1 })
-        monitor.start()
+                                       onClip: { captured.append($0) })
         board.text = "Synthetic new copy"
+        board.rtf = try NSAttributedString(string: board.text, attributes: [.font: NSFont.boldSystemFont(ofSize: 18)])
+            .data(from: NSRange(location: 0, length: board.text.utf16.count), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+        let originalRTF = board.rtf
+        board.advertisedTypes.append("public.rtf")
         board.changeCount = 2
-        let client = PasteClient(write: { _ in XCTFail("Plain paste must not rewrite the clipboard"); return nil },
-                                 changeCount: { board.changeCount }, isTrusted: { true }, activate: { _ in true },
-                                 waitForFocus: {}, isFrontmost: { _ in true }, isEditableTarget: { _ in true },
-                                 pasteKeyCode: { nil }, sendPaste: { _ in false }, sendPlainText: { _, _ in true })
+        // The shortcut coordinator captures the copy before requesting paste.
+        monitor.pollOnce()
+        let client = PasteClient(write: { text in
+            board.text = text
+            board.rtf = nil
+            board.advertisedTypes = ["public.utf8-plain-text"]
+            board.changeCount += 1
+            return board.changeCount
+        }, changeCount: { board.changeCount }, isTrusted: { true }, activate: { _ in true },
+           waitForFocus: {}, isFrontmost: { _ in true }, isEditableTarget: { _ in true },
+           pasteKeyCode: { 9 }, sendPaste: { code in
+            XCTAssertEqual(code, 9)
+            XCTAssertEqual(board.text, "Synthetic new copy")
+            XCTAssertNil(board.rtf)
+            return true
+        })
         let service = PasteService(client: client, pasteboard: board,
                                    recordSelfWrite: { monitor.recordSelfWrite(changeCount: $0) })
 
         let result = await service.pasteCurrentClipboardAsPlainText(previousApp: 123)
         XCTAssertEqual(result, .pasted)
         monitor.pollOnce()
-        XCTAssertEqual(captured, 1)
-        XCTAssertEqual(board.changeCount, 2)
+        XCTAssertEqual(captured.count, 1)
+        XCTAssertEqual(captured.first?.text, "Synthetic new copy")
+        XCTAssertEqual(captured.first?.formattedRTF, originalRTF)
+        XCTAssertEqual(board.changeCount, 3)
     }
 
     func testPlainShortcutDoesNotReadOrRewriteClipboardWithoutAccessibility() async {
@@ -382,6 +481,7 @@ import FlycutCore
     let pasteboard = ShortcutBoard()
     var writtenText: String?
     var insertedText: String?
+    var insertionSucceeds = true
     var count = 2
     var frontmost = true
     var editable = true
@@ -407,7 +507,7 @@ import FlycutCore
         },
         pasteKeyCode: { [unowned self] in key },
         sendPaste: { [unowned self] key in actions.append("key:\(key)"); return true },
-        sendPlainText: { [unowned self] text, pid in insertedText = text; actions.append("insert:\(pid)"); return true }
+        sendPlainText: { [unowned self] text, pid in insertedText = text; actions.append("insert:\(pid)"); return insertionSucceeds }
     ), pasteboard: pasteboard, recordSelfWrite: { [unowned self] count in actions.append("record:\(count)") })
 }
 
@@ -426,7 +526,8 @@ import FlycutCore
     var text = ""
     var advertisedTypes = ["public.utf8-plain-text"]
     func readPlainText() -> PasteboardReadResult { .text(text) }
-    func readRTF() -> Data? { nil }
+    var rtf: Data?
+    func readRTF() -> Data? { rtf }
 }
 
 @MainActor private final class FocusGate {

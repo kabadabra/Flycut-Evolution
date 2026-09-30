@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2 (unreleased)
+
+- Close the menu bar palette on outside left, right, and middle clicks, including after a sticky paste.
+- Use plain-text clipboard paste and the destination editor’s normal Paste command for Command+Shift+V. Avoid Accessibility text setters that Teams can report as successful without inserting text.
+- Capture newly copied content before the shortcut strips clipboard formatting, keeping the original clipping available in history.
+- Distinguish user dismissal from closing the palette to begin a paste, so paste preparation does not cancel the request.
+
 ## 1.0.1 (2026-09-28)
 
 Flycut Evolution 1.0.1 improves paste reliability and keeps the menu bar palette in place. It supports macOS 14 or later on Apple Silicon and Intel Macs.

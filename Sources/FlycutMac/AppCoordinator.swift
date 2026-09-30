@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import SwiftUI
 import FlycutCore
 import FlycutPlatform
@@ -239,12 +240,18 @@ import FlycutPlatform
         }
     }
     private func pasteCurrentClipboardAsPlainText() {
+        let logger = Logger(subsystem: "com.edynamics.flycut", category: "PlainPaste")
+        logger.notice("Shortcut received; trusted=\(self.accessibility.isTrusted) foreground=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)")
         pasteTask?.cancel()
+        // Capture a just-copied rich item before a fallback replaces its formats.
+        monitor.pollOnce()
+        shell.dismiss(cancelPaste: false)
         pasteTargets.observeActivation(processID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
         let target = pasteTargets.previousExternalApp
         pasteTask = Task { [weak self] in
             guard let self, !Task.isCancelled else { return }
             let result = await paste.pasteCurrentClipboardAsPlainText(previousApp: target)
+            logger.notice("Shortcut result=\(String(describing: result), privacy: .public) target=\(target ?? -1) cancelled=\(Task.isCancelled)")
             guard !Task.isCancelled else { return }
             reportPasteResult(result, showPanelOnFailure: false)
         }

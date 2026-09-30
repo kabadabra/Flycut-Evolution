@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import FlycutCore
 
 public enum PasteMode: Sendable { case copy, paste }
@@ -69,6 +70,7 @@ public enum PasteResult: Equatable, Sendable {
     }
 
     private static func postCommand(_ code: UInt16) -> Bool {
+        Logger(subsystem: "com.edynamics.flycut", category: "PlainPaste").notice("Posting command; key=\(code) modifiers=\(CGEventSource.flagsState(.combinedSessionState).rawValue)")
         guard let source = CGEventSource(stateID: .privateState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { return false }
@@ -105,16 +107,19 @@ public enum PasteResult: Equatable, Sendable {
         guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
               pasteboard.changeCount == sourceCount else { return .pasteUnavailable }
         guard client.isTrusted() else { return .pasteNeedsAccessibility }
-        if !client.isEditableTarget(pid) {
-            guard client.focusComposer(pid) else { return .noEditableTarget }
-            await client.waitForFocus()
-            guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
-                  pasteboard.changeCount == sourceCount, client.isEditableTarget(pid) else { return .noEditableTarget }
-        }
+        // Always use the editor's normal Paste command. Teams can accept an
+        // AXSelectedText setter without changing its web editor, so AX success
+        // cannot establish that text was inserted.
         guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
               pasteboard.changeCount == sourceCount else { return .pasteUnavailable }
         guard client.isTrusted() else { return .pasteNeedsAccessibility }
-        return client.sendPlainText(text, pid) ? .pasted : .pasteUnavailable
+        guard let code = client.pasteKeyCode() else { return .pasteUnavailable }
+        guard let count = client.write(text) else { return .writeFailed }
+        recordSelfWrite(count)
+        guard !Task.isCancelled, request == generation, client.isFrontmost(pid),
+              client.changeCount() == count else { return .pasteUnavailable }
+        guard client.isTrusted() else { return .pasteNeedsAccessibility }
+        return client.sendPaste(code) ? .pasted : .pasteUnavailable
     }
 
     public func copyOrPaste(_ text: String, mode: PasteMode, previousApp: pid_t?) async -> PasteResult {
