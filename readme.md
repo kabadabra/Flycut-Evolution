@@ -1,5 +1,7 @@
 # Flycut Evolution
 
+![Flycut Evolution clipboard manager with instant search, plain-text paste, favorites, image and file previews, privacy controls, and optional iCloud sync](docs/images/flycut-evolution-hero.png)
+
 Flycut Evolution is a free, open source clipboard manager for Mac. It keeps copied text, images, and file references within reach, so you can search, preview, and paste them again from the menu bar. Emerging Dynamics maintains this Swift rewrite as a continuation of [TermiT/Flycut](https://github.com/TermiT/Flycut), which was based on [Jumpcut](http://jumpcut.sourceforge.net/). The app remains [MIT licensed](license.txt).
 
 **Version 1.0.2** · **[Download the latest release](https://github.com/kabadabra/Flycut-Evolution/releases/latest)** · [What changed](CHANGELOG.md) · [Report an issue](https://github.com/kabadabra/Flycut-Evolution/issues)
