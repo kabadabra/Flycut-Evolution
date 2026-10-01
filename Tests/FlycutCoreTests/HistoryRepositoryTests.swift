@@ -70,7 +70,7 @@ final class HistoryRepositoryTests: XCTestCase {
         XCTAssertEqual(sqlite3_prepare_v2(check, "PRAGMA user_version", -1, &statement, nil), SQLITE_OK)
         defer { sqlite3_finalize(statement) }
         XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
-        XCTAssertEqual(sqlite3_column_int(statement, 0), 2)
+        XCTAssertEqual(sqlite3_column_int(statement, 0), 5)
     }
 
     func testFavoritesRemainSeparateAndSameTextDuplicatesSurvive() async throws {
@@ -183,7 +183,7 @@ final class HistoryRepositoryTests: XCTestCase {
         XCTAssertEqual(sqlite3_prepare_v2(handle, "PRAGMA user_version", -1, &statement, nil), SQLITE_OK)
         defer { sqlite3_finalize(statement) }
         XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
-        XCTAssertEqual(sqlite3_column_int(statement, 0), 2)
+        XCTAssertEqual(sqlite3_column_int(statement, 0), 5)
     }
 
     func testExactTextIncludingEmbeddedNullRoundTrips() async throws {

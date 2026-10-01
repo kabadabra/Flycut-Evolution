@@ -56,6 +56,9 @@ enum PalettePresentation {
         if popover.isShown { dismiss(); return }
         showPalette()
     }
+    func togglePalette() {
+        if popover.isShown { dismiss() } else { showPalette() }
+    }
     func showPalette() {
         guard let button = item.button else { return }
         willPresent()

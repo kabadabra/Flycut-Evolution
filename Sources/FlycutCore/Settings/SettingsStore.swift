@@ -9,7 +9,10 @@ public struct SettingsStore {
         self.defaults = defaults
     }
 
+    public var isEstablishedInstallation: Bool { defaults.dictionaryRepresentation().keys.contains { $0.hasPrefix(prefix) } }
     public func load() -> FlycutSettings {
+        let established = isEstablishedInstallation
+        if defaults.object(forKey: prefix + "imageCaptureEnabled") == nil { defaults.set(!established, forKey: prefix + "imageCaptureEnabled") }
         migratePaletteSizeIfNeeded()
         let fallback = FlycutSettings()
         guard let data = try? JSONEncoder().encode(fallback),
@@ -52,6 +55,11 @@ public struct SettingsStore {
         if settings.autoSaveToLocation == nil { defaults.removeObject(forKey: prefix + "autoSaveToLocation") }
     }
 
+    public func loadSetup() -> SetupState {
+        guard let data = defaults.data(forKey: "setup.state"), let state = try? JSONDecoder().decode(SetupState.self, from: data) else { return .init() }
+        return state
+    }
+    public func saveSetup(_ state: SetupState) { if let data = try? JSONEncoder().encode(state) { defaults.set(data, forKey: "setup.state") } }
     private func migratePaletteSizeIfNeeded() {
         guard !defaults.bool(forKey: paletteSizeMigrationKey) else { return }
         if defaults.object(forKey: prefix + "bezelWidth") != nil,

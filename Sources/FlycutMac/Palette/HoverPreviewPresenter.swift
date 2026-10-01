@@ -13,9 +13,9 @@ import FlycutCore
         popover.contentSize = NSSize(width: 368, height: 390)
     }
 
-    func show(_ clip: Clip, beside anchor: NSView, onHover: @escaping (Bool) -> Void) {
+    func show(_ clip: Clip, images: ImagePreviewModel, beside anchor: NSView, onHover: @escaping (Bool) -> Void) {
         guard anchor.window != nil else { return }
-        let content = AnyView(ClippingPreview(clip: clip).onHover(perform: onHover))
+        let content = AnyView(ClippingPreview(clip: clip, images: images).onHover(perform: onHover))
         if let controller = popover.contentViewController as? NSHostingController<AnyView> {
             controller.rootView = content
         } else {
@@ -41,16 +41,18 @@ import FlycutCore
 struct HoverPreviewAnchor: NSViewRepresentable {
     let clip: Clip
     let isPresented: Bool
+    let images: ImagePreviewModel
     let onHover: (Bool) -> Void
 
     @MainActor final class Coordinator {
         let presenter = HoverPreviewPresenter()
         var clip: Clip?
+        var images: ImagePreviewModel?
         var onHover: (Bool) -> Void = { _ in }
 
         func refresh(in view: NSView) {
             guard view.window != nil else { presenter.close(); return }
-            if let clip { presenter.show(clip, beside: view, onHover: onHover) }
+            if let clip, let images { presenter.show(clip, images: images, beside: view, onHover: onHover) }
             else { presenter.close() }
         }
     }
@@ -68,6 +70,7 @@ struct HoverPreviewAnchor: NSViewRepresentable {
 
     func updateNSView(_ view: NSView, context: Context) {
         context.coordinator.clip = isPresented ? clip : nil
+        context.coordinator.images = images
         context.coordinator.onHover = onHover
         context.coordinator.refresh(in: view)
     }

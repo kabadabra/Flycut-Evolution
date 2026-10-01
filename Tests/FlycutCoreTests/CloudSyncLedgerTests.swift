@@ -3,6 +3,18 @@ import XCTest
 @testable import FlycutCore
 
 final class CloudSyncLedgerTests: XCTestCase {
+    func testDisabledImageSyncDoesNotTombstoneOrEraseLocalImages() {
+        let image = Clip(id: UUID(), text: "", pasteboardType: "public.png", sourceAppName: nil, sourceBundleURL: nil, capturedAt: nil, collection: .recent, order: 0, image: .init(assetHash: "one", width: 1, height: 1, byteCount: 1))
+        var ledger = CloudSyncLedger(deviceID: "local")
+        let snapshot = HistorySnapshot(recent: [image], favorites: [])
+        _ = ledger.recordLocal(snapshot, at: Date(), includeImages: true)
+        ledger.acknowledge(Array(ledger.pendingIDs))
+        XCTAssertTrue(ledger.recordLocal(.init(recent: [], favorites: []), at: Date(), includeImages: false).isEmpty)
+        let merged = ledger.applyRemote([], to: snapshot, at: Date(), includeImages: false)
+        XCTAssertEqual(merged.recent.first?.id, image.id)
+        XCTAssertNotNil(ledger.entries[image.id]?.clip)
+    }
+
     private func clip(_ text: String, app: String = "Source", id: UUID = UUID(), at time: TimeInterval = 10) -> Clip {
         Clip(id: id, text: text, pasteboardType: "public.utf8-plain-text", sourceAppName: app,
              sourceBundleURL: nil, capturedAt: Date(timeIntervalSince1970: time), collection: .recent, order: 0)

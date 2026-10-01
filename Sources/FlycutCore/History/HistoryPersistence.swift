@@ -11,14 +11,25 @@ public actor HistoryPersistence {
         restored = false
         expectedDestination = nil
         let snapshot = try await destination.snapshot()
-        try await working.replaceAll(snapshot)
+        if let source = destination as? any ImageAssetRepository, let target = working as? any ImageAssetRepository {
+            try await target.replaceAll(snapshot, assets: source.exportAssets(for: snapshot), expected: nil)
+        } else { try await working.replaceAll(snapshot) }
         expectedDestination = snapshot
         restored = true
     }
 
     @discardableResult
     public func save(_ snapshot: HistorySnapshot) async throws -> Bool {
+        try await save(snapshot, assets: [])
+    }
+    @discardableResult
+    public func save(_ snapshot: HistorySnapshot, assets: [ImageAsset]) async throws -> Bool {
         guard restored, let expectedDestination else { return false }
+        if let target = destination as? any ImageAssetRepository {
+            try await target.replaceAll(snapshot, assets: assets, expected: expectedDestination)
+            self.expectedDestination = snapshot
+            return true
+        }
         let saved = try await destination.update { current in
             guard current == expectedDestination else { throw HistoryError.staleSnapshot }
             current = snapshot

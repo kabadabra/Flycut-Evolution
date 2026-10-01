@@ -12,12 +12,14 @@ public enum HotkeyError: Error, Equatable { case conflict, system(Int32), invali
     private let client: any HotkeyClient
     private let onPress: @MainActor () -> Void
     private var registered = false
+    public private(set) var currentShortcut: FlycutHotkey?
     public init(client: any HotkeyClient = CarbonHotkeyClient(), onPress: @escaping @MainActor () -> Void = {}) {
         self.client = client; self.onPress = onPress
     }
     isolated deinit { if registered { client.unregister() } }
     public func register(_ shortcut: FlycutHotkey) throws {
         guard (0...127).contains(shortcut.keyCode), shortcut.modifierFlags >= 0 else { throw HotkeyError.invalidShortcut }
+        let previous = currentShortcut
         unregister()
         let flags = NSEvent.ModifierFlags(rawValue: UInt(shortcut.modifierFlags))
         var carbon: UInt32 = 0
@@ -26,17 +28,23 @@ public enum HotkeyError: Error, Equatable { case conflict, system(Int32), invali
         if flags.contains(.option) { carbon |= UInt32(optionKey) }
         if flags.contains(.control) { carbon |= UInt32(controlKey) }
         let status = client.register(keyCode: UInt32(shortcut.keyCode), modifiers: carbon, onPress: onPress)
-        guard status == noErr else { throw status == eventHotKeyExistsErr ? HotkeyError.conflict : .system(status) }
+        guard status == noErr else {
+            if let previous { try? register(previous) }
+            throw status == eventHotKeyExistsErr ? HotkeyError.conflict : .system(status)
+        }
         registered = true
+        currentShortcut = shortcut
     }
-    public func unregister() { if registered { client.unregister(); registered = false } }
+    public func unregister() { if registered { client.unregister(); registered = false }; currentShortcut = nil }
 }
 
 @MainActor public final class CarbonHotkeyClient: HotkeyClient {
     private var hotkey: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private var onPress: (@MainActor () -> Void)?
-    public init() {}
+    private let identifier: UInt32
+    public init(identifier: UInt32 = 1) { self.identifier = identifier }
+    func ownsEvent(signature: UInt32, id: UInt32) -> Bool { signature == 0x464C5943 && id == identifier }
     isolated deinit { unregister() }
     public func register(keyCode: UInt32, modifiers: UInt32, onPress: @escaping @MainActor () -> Void) -> Int32 {
         unregister()
@@ -47,14 +55,16 @@ public enum HotkeyError: Error, Equatable { case conflict, system(Int32), invali
             var id = EventHotKeyID()
             let status = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
                                            MemoryLayout<EventHotKeyID>.size, nil, &id)
-            guard status == noErr, id.signature == 0x464C5943, id.id == 1 else { return OSStatus(eventNotHandledErr) }
-            MainActor.assumeIsolated {
-                Unmanaged<CarbonHotkeyClient>.fromOpaque(context).takeUnretainedValue().onPress?()
+            guard status == noErr else { return OSStatus(eventNotHandledErr) }
+            return MainActor.assumeIsolated {
+                let client = Unmanaged<CarbonHotkeyClient>.fromOpaque(context).takeUnretainedValue()
+                guard client.ownsEvent(signature: id.signature, id: id.id) else { return OSStatus(eventNotHandledErr) }
+                client.onPress?()
+                return noErr
             }
-            return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &handler)
         guard installed == noErr else { unregister(); return installed }
-        let result = RegisterEventHotKey(keyCode, modifiers, EventHotKeyID(signature: 0x464C5943, id: 1),
+        let result = RegisterEventHotKey(keyCode, modifiers, EventHotKeyID(signature: 0x464C5943, id: identifier),
                                          GetApplicationEventTarget(), 0, &hotkey)
         if result != noErr { unregister() }
         return result

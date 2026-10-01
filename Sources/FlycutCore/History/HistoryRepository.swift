@@ -45,6 +45,9 @@ public enum HistoryError: Error, Equatable, Sendable {
     case duplicateID
     case missingClip
     case invalidCollection
+    case invalidFavorite
+    case shortcutInUse
+    case invalidFavoriteOrder
     case unsupportedSchema(Int)
     case staleSnapshot
     case database(String)

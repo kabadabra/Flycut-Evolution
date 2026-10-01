@@ -155,6 +155,88 @@ final class ClipboardMonitorTests: XCTestCase {
         XCTAssertEqual(sink.clips.map(\.text), ["later copy"])
     }
 
+    func testSensitiveTypesAreBlockedBeforePayloadRead() {
+        let board = FakePasteboard(count: 1, result: .text("private"))
+        board.advertisedTypes = ["org.nspasteboard.ConcealedType", "public.rtf"]
+        let sink = ClipSink()
+        let monitor = makeMonitor(board: board, sink: sink)
+        board.changeCount = 2
+        monitor.pollOnce()
+        XCTAssertEqual(board.readCount, 0)
+        XCTAssertEqual(board.rtfReadCount, 0)
+        XCTAssertTrue(sink.clips.isEmpty)
+    }
+
+    func testExcludedAppIsBlockedBeforePayloadRead() {
+        let board = FakePasteboard(count: 1, result: .text("private"))
+        var settings = FlycutSettings()
+        settings.excludedApplications = [.init(bundleIdentifier: "example.private", displayName: "Private")]
+        let sink = ClipSink()
+        let monitor = ClipboardMonitor(pasteboard: board, settings: { settings },
+            source: { .init(appName: "Private", bundleURL: nil, bundleIdentifier: "example.private") },
+            onClip: { sink.clips.append($0) })
+        board.changeCount = 2
+        monitor.pollOnce()
+        XCTAssertEqual(board.readCount, 0)
+        XCTAssertTrue(sink.clips.isEmpty)
+    }
+
+    func testExpirySkipsCopyBetweenPausedPolls() {
+        let board = FakePasteboard(count: 1, result: .text("paused"))
+        let sink = ClipSink()
+        var time = Date(timeIntervalSince1970: 100)
+        let monitor = ClipboardMonitor(pasteboard: board, settings: { FlycutSettings() }, now: { time }, onClip: { sink.clips.append($0) })
+        monitor.pause(for: 300)
+        board.changeCount = 2
+        time = time.addingTimeInterval(300)
+        monitor.pollOnce()
+        XCTAssertFalse(monitor.isPaused)
+        XCTAssertEqual(board.readCount, 0)
+        board.changeCount = 3
+        monitor.pollOnce()
+        XCTAssertEqual(sink.clips.count, 1)
+    }
+    func testIgnoreNextExternalChangeIncludingUnsupportedPreservesOwnWrites() {
+        let board = FakePasteboard(count: 1, result: .unavailable)
+        let sink = ClipSink()
+        let monitor = makeMonitor(board: board, sink: sink)
+        monitor.ignoreNextCopy()
+        board.changeCount = 2; monitor.recordSelfWrite(changeCount: 2); monitor.pollOnce()
+        XCTAssertTrue(monitor.captureState.ignoresNextCopy)
+        board.changeCount = 3; monitor.pollOnce()
+        XCTAssertFalse(monitor.captureState.ignoresNextCopy)
+        XCTAssertEqual(board.readCount, 0)
+        board.changeCount = 4; board.result = .text("fresh"); monitor.pollOnce()
+        XCTAssertEqual(sink.clips.map(\.text), ["fresh"])
+    }
+    func testTimedExpiryWithoutClipboardChangeAndSettingEditsKeepsDeadline() {
+        let board = FakePasteboard(count: 1, result: .text("old"))
+        var time = Date(timeIntervalSince1970: 100)
+        var settings = FlycutSettings()
+        let monitor = ClipboardMonitor(pasteboard: board, settings: { settings }, now: { time }, onClip: { _ in XCTFail() })
+        monitor.pause(for: 300)
+        settings.showHoverPreview = false
+        time = time.addingTimeInterval(299); monitor.pollOnce(); XCTAssertTrue(monitor.isPaused)
+        time = time.addingTimeInterval(1); monitor.pollOnce(); XCTAssertFalse(monitor.isPaused)
+        XCTAssertEqual(board.readCount, 0)
+    }
+    func testInvalidImageWithRealTextFallsBackWithoutLosingText() async {
+        let board = FakePasteboard(count: 1, result: .text("valid text"))
+        board.advertisedTypes = ["public.png", "public.utf8-plain-text"]
+        board.imageResult = .data(Data([1,2,3]), type: "public.png")
+        let sink = ClipSink()
+        let monitor = makeMonitor(board: board, sink: sink)
+        board.changeCount = 2; monitor.pollOnce()
+        for _ in 0..<100 where sink.clips.isEmpty { try? await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertEqual(sink.clips.map(\.text), ["valid text"])
+    }
+    func testExcludedAndSensitiveImageObservationsReadNoFormats() {
+        let board = FakePasteboard(count: 1, result: .text("private"))
+        board.advertisedTypes = ["public.png", "org.nspasteboard.ConcealedType"]
+        let sink = ClipSink(), monitor = makeMonitor(board: board, sink: ClipSink())
+        board.changeCount = 2; monitor.pollOnce()
+        XCTAssertEqual(board.readCount, 0); XCTAssertEqual(board.imageReadCount, 0); XCTAssertTrue(sink.clips.isEmpty)
+    }
     private func makeMonitor(board: FakePasteboard, sink: ClipSink, onDenied: @escaping @MainActor () -> Void = {}) -> ClipboardMonitor {
         let monitor = ClipboardMonitor(
             pasteboard: board,
@@ -178,6 +260,9 @@ final class ClipboardMonitorTests: XCTestCase {
     var onRead: (() -> Void)?
     var rtf: Data?
     var rtfReadCount = 0
+    var imageResult: PasteboardImageReadResult = .unavailable
+    var imageReadCount = 0
+    func readImage() -> PasteboardImageReadResult { imageReadCount += 1; return imageResult }
 
     init(count: Int, result: PasteboardReadResult) {
         changeCount = count

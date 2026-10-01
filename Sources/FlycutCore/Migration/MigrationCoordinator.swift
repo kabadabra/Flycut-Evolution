@@ -8,7 +8,7 @@ public actor MigrationCoordinator {
     public private(set) var activeRepository: any HistoryRepository
     private var memoryRepository: (any HistoryRepository)?
     private var importing = false
-    private var memoryBackups: [String: (Data, HistorySnapshot)] = [:]
+    private var memoryBackups: [String: (Data, HistorySnapshot, [ImageAsset])] = [:]
 
     public init(destination: any HistoryRepository, backupDirectory: URL, memoryDestination: (any HistoryRepository)? = nil) {
         self.memoryRepository = memoryDestination
@@ -76,6 +76,7 @@ public actor MigrationCoordinator {
         let sourceBackup = backupDirectory.appendingPathComponent("\(backupID)-source.plist")
         let destinationBackup = backupDirectory.appendingPathComponent("\(backupID)-destination.json")
         if !memoryOnly { try Self.privateWrite(data, to: sourceBackup) }
+        let backupAssets = try await (target as? any ImageAssetRepository)?.exportAssets(for: before) ?? []
         let imported = parsed.history
         let timestamp = Date()
         let result = try await target.update { current in
@@ -83,7 +84,10 @@ public actor MigrationCoordinator {
             if Self.contains(current.migration, source: source) { return }
             try Self.validate(choice, destination: current)
             if !memoryOnly && (!current.recent.isEmpty || !current.favorites.isEmpty) {
-                try Self.privateWrite(JSONEncoder().encode(current), to: destinationBackup)
+                guard current == before else { throw MigrationError.previewChanged }
+                var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as! [String: Any]
+                object["imageAssets"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(backupAssets))
+                try Self.privateWrite(JSONSerialization.data(withJSONObject: object), to: destinationBackup)
             }
             let identities = Set((current.migration?.importedSourceIdentities ?? []) + [current.migration?.sourceIdentity, source.identity].compactMap { $0 })
             switch choice {
@@ -96,7 +100,7 @@ public actor MigrationCoordinator {
         report.settings.recentCapacity = max(report.settings.recentCapacity, result.recent.count)
         report.settings.favoriteCapacity = max(report.settings.favoriteCapacity, result.favorites.count)
         if memoryOnly {
-            memoryBackups[source.identity] = (data, before)
+            memoryBackups[source.identity] = (data, before, backupAssets)
             report.warnings.append("Save-never: history, migration marker and backups remain in memory; no new clipboard files were written.")
         } else {
             report.sourceBackup = sourceBackup

@@ -11,6 +11,8 @@ import FlycutPlatform
     var cloudSyncNow: () -> Void = {}
     var importLegacy: () -> Void = {}
     var recover: () -> Void = {}
+    var checkForUpdates: () -> Void = {}
+    var showSetup: () -> Void = {}
     init(_ value: FlycutSettings) { self.value = value }
 }
 
@@ -18,9 +20,9 @@ struct SettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var typesText = ""
     @State private var lengthsText = ""
-    private var shortcutLabel: String {
-        let flags = NSEvent.ModifierFlags(rawValue: UInt(model.value.hotkey.modifierFlags))
-        return [(NSEvent.ModifierFlags.control, "Control"), (.option, "Option"), (.shift, "Shift"), (.command, "Command")].compactMap { flags.contains($0.0) ? $0.1 : nil }.joined(separator: "–") + "–" + KeyboardLayout().label(for: model.value.hotkey.keyCode)
+    private func shortcutLabel(_ shortcut: FlycutHotkey) -> String {
+        let flags = NSEvent.ModifierFlags(rawValue: UInt(shortcut.modifierFlags))
+        return [(NSEvent.ModifierFlags.control, "Control"), (.option, "Option"), (.shift, "Shift"), (.command, "Command")].compactMap { flags.contains($0.0) ? $0.1 : nil }.joined(separator: "–") + "–" + KeyboardLayout().label(for: shortcut.keyCode)
     }
     var body: some View {
         VStack {
@@ -28,6 +30,7 @@ struct SettingsView: View {
                 general.tabItem { Label("General", systemImage: "gear") }
                 shortcuts.tabItem { Label("Shortcuts", systemImage: "keyboard") }
                 privacy.tabItem { Label("Privacy", systemImage: "lock") }
+                images.tabItem { Label("Images", systemImage: "photo") }
                 cloudSync.tabItem { Label("Cloud Sync", systemImage: "icloud") }
                 appearance.tabItem { Label("Appearance", systemImage: "paintbrush") }
                 AboutView().tabItem { Label("About", systemImage: "info.circle") }
@@ -44,6 +47,9 @@ struct SettingsView: View {
         lengthsText = model.value.skippedPasswordLengths.map(String.init).joined(separator: ", ")
     }
     private func applyEdited() {
+        guard model.value.hotkey != model.value.historyHotkey else {
+            model.message = "Choose different shortcuts for Open History and plain-text paste."; return
+        }
         let pieces = lengthsText.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         let lengths = pieces.compactMap(Int.init)
         guard pieces.count == lengths.count && lengths.allSatisfy({ $0 > 0 }) else {
@@ -56,6 +62,9 @@ struct SettingsView: View {
     }
     private var general: some View {
         ScrollView { Form {
+            Toggle("Check for updates automatically", isOn: $model.value.automaticUpdateChecks)
+            Text("Optional checks contact the release server. You choose when to download and install signed updates.").font(.caption)
+            HStack { Button("Check for Updates…", action: model.checkForUpdates); Button("Setup…", action: model.showSetup) }
             Toggle("Open at Login", isOn: $model.value.openAtLogin)
             Button("Open Login Items Settings", action: LoginItemService.openSettings)
             Stepper("Recent capacity: \(model.value.recentCapacity)", value: $model.value.recentCapacity, in: 1...100000)
@@ -80,14 +89,17 @@ struct SettingsView: View {
     }
     private var shortcuts: some View {
         Form {
-            Text("Paste current clipboard as plain text: \(shortcutLabel)")
+            Text("Paste current clipboard as plain text: \(shortcutLabel(model.value.hotkey))")
             ShortcutRecorder(hotkey: $model.value.hotkey)
                 .frame(height: 36)
             Button("Reset to Shift–Command–V") { model.value.hotkey = FlycutSettings().hotkey }
-            Text("The menu bar icon opens your clippings. Single-click a clipping or press Return to paste it with its saved formatting when available. Use the text icon beside a formatted clipping to paste that clipping without formatting. If no field is selected, it stays on the clipboard.").font(.caption)
+            Text("Open History: \(shortcutLabel(model.value.historyHotkey))")
+            ShortcutRecorder(hotkey: $model.value.historyHotkey).frame(height: 36)
+            Button("Reset to Option–Command–V") { model.value.historyHotkey = FlycutSettings().historyHotkey }
+            Text("Open History or the menu bar icon opens your clippings with search ready. Single-click a clipping or press Return to paste it with its saved formatting when available. Use the text icon beside a formatted clipping to paste that clipping without formatting. If no field is selected, it stays on the clipboard.").font(.caption)
             Toggle("Keep palette open after copy or paste", isOn: $model.value.stickyPalette)
             Toggle("Wrap selection at first and last clipping", isOn: $model.value.wraparoundPalette)
-            Text("In the palette: arrows or j/k select, Return activates, Escape closes, f favorites, F switches lists, s exports, S exports the list. Type in search to filter.").font(.callout)
+            Text("In the palette: ⌘1–9 activates visible results; ⌥⌘1–9 activates assigned favorites. Arrows select, Return activates, Escape closes, and ⌘F focuses search. Right-click favorites to edit; reorder in the Favorites filter.").font(.callout)
         }.padding()
     }
     private var privacy: some View {
@@ -101,13 +113,24 @@ struct SettingsView: View {
             Toggle("Show saved pasteboard type in clipping rows", isOn: $model.value.revealPasteboardTypes)
             Toggle("Suppress automatic Accessibility reminder", isOn: $model.value.suppressAccessibilityAlert)
             Text("Copy fallback and the Accessibility Settings link remain available.").font(.caption)
+            PrivacySettingsView(excluded: $model.value.excludedApplications)
             PermissionView()
         }.padding() }
+    }
+    private var images: some View {
+        Form {
+            Toggle("Capture copied images and screenshots", isOn: $model.value.imageCaptureEnabled)
+            Toggle("Recognize text locally for search", isOn: $model.value.imageRecognitionEnabled)
+            Stepper("Image storage: \(model.value.imageStorageLimitMiB) MiB", value: $model.value.imageStorageLimitMiB, in: 50...2048, step: 50)
+            Text("Recognition runs on this Mac. Capture honors privacy exclusions and pause. Images are limited to 16 MiB and 24 million pixels. Old recent images are removed when storage fills; favorites are kept.").font(.caption)
+            Toggle("Sync images with my Macs", isOn: $model.value.imageSyncEnabled)
+            Text("Requires Cloud Sync and image sync enabled on each Mac. Uploads existing and future images, including recognized text, to your private iCloud account. Turning it off keeps local and cloud copies.").font(.caption)
+        }.padding()
     }
     private var cloudSync: some View {
         Form {
             Toggle("Sync history and favorites across my Macs", isOn: $model.value.cloudSyncEnabled)
-            Text("Turning this on uploads existing and future text clippings, including saved RTF formatting when available, to your private iCloud account. Other Macs signed into the same Apple Account can receive them after you enable sync there. Settings remain on each Mac.")
+            Text("Turning this on uploads existing and future text clippings, saved RTF formatting, and file-reference metadata to your private iCloud account. Document contents are not uploaded through file references. Other Macs signed into the same Apple Account can receive them after you enable sync there. Settings remain on each Mac.")
                 .font(.caption)
             Text("Cloud Sync saves local history after each change. Turning sync off keeps your local history and previously synced cloud history.")
                 .font(.caption)

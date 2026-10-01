@@ -12,6 +12,8 @@ public enum PasteResult: Equatable, Sendable {
 /// All system effects are injected. A successful write returns the final change count.
 @MainActor public struct PasteClient {
     public var write: (String) -> Int?
+    public var writeImage: (Data) -> Int?
+    public var writeFiles: ([URL]) -> Int?
     public var writeFormatted: (String, Data) -> Int?
     public var changeCount: () -> Int
     public var isTrusted: () -> Bool
@@ -31,7 +33,10 @@ public enum PasteResult: Equatable, Sendable {
                 pasteKeyCode: @escaping () -> UInt16?,
                 sendPaste: @escaping (UInt16) -> Bool,
                 sendPlainText: @escaping (String, pid_t) -> Bool = { _, _ in false },
-                writeFormatted: ((String, Data) -> Int?)? = nil) {
+                writeFormatted: ((String, Data) -> Int?)? = nil,
+                writeImage: @escaping (Data) -> Int? = { _ in nil },
+                writeFiles: @escaping ([URL]) -> Int? = { _ in nil }) {
+        self.writeImage = writeImage; self.writeFiles = writeFiles
         self.write = write; self.changeCount = changeCount; self.isTrusted = isTrusted; self.activate = activate
         self.writeFormatted = writeFormatted ?? { text, _ in write(text) }
         self.waitForFocus = waitForFocus; self.isFrontmost = isFrontmost; self.isEditableTarget = isEditableTarget
@@ -66,7 +71,21 @@ public enum PasteResult: Equatable, Sendable {
             guard board.setString(text, forType: .string) else { return nil }
             _ = board.setData(rtf, forType: .rtf)
             return board.changeCount
+        }, writeImage: { data in
+            let board = NSPasteboard.general
+            board.clearContents()
+            guard board.setData(data, forType: .png) else { return nil }
+            return board.changeCount
+        }, writeFiles: { urls in
+            writeFileURLs(urls, to: .general)
         })
+    }
+
+    static func writeFileURLs(_ urls: [URL], to board: NSPasteboard) -> Int? {
+        guard !urls.isEmpty, urls.count <= 100, urls.allSatisfy({ $0.isFileURL && FileManager.default.fileExists(atPath: $0.path) }) else { return nil }
+        board.clearContents()
+        guard board.writeObjects(urls.map { $0 as NSURL }) else { return nil }
+        return board.changeCount
     }
 
     private static func postCommand(_ code: UInt16) -> Bool {
@@ -127,8 +146,20 @@ public enum PasteResult: Equatable, Sendable {
     }
 
     public func copyOrPaste(_ clip: Clip, plain: Bool, mode: PasteMode, previousApp: pid_t?) async -> PasteResult {
-        await copyOrPaste(clip.text, formattedRTF: plain ? nil : clip.formattedRTF,
-                          mode: mode, previousApp: previousApp)
+        if let image = clip.image {
+            guard plain, let text = image.recognizedText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .clipboardUnavailable }
+            return await copyOrPaste(text, mode: mode, previousApp: previousApp)
+        }
+        if let files = clip.files, !files.isEmpty {
+            if plain { return await copyOrPaste(files.map(\.path).joined(separator: "\n"), mode: mode, previousApp: previousApp) }
+            let urls = files.map(\.url)
+            guard urls.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else { return .clipboardUnavailable }
+            generation += 1
+            let request = generation
+            guard let count = client.writeFiles(urls) else { return .writeFailed }
+            return await finishPaste(count: count, mode: mode, previousApp: previousApp, request: request, requiresEditableTarget: false)
+        }
+        return await copyOrPaste(clip.text, formattedRTF: plain ? nil : clip.formattedRTF, mode: mode, previousApp: previousApp)
     }
 
     private func copyOrPaste(_ text: String, formattedRTF: Data?, mode: PasteMode, previousApp: pid_t?) async -> PasteResult {
@@ -136,6 +167,15 @@ public enum PasteResult: Equatable, Sendable {
         let request = generation
         let count = formattedRTF.map { client.writeFormatted(text, $0) } ?? client.write(text)
         guard let count else { return .writeFailed }
+        return await finishPaste(count: count, mode: mode, previousApp: previousApp, request: request)
+    }
+    public func copyOrPasteImage(_ png: Data, mode: PasteMode, previousApp: pid_t?) async -> PasteResult {
+        generation += 1
+        let request = generation
+        guard let count = client.writeImage(png) else { return .writeFailed }
+        return await finishPaste(count: count, mode: mode, previousApp: previousApp, request: request)
+    }
+    private func finishPaste(count: Int, mode: PasteMode, previousApp: pid_t?, request: Int, requiresEditableTarget: Bool = true) async -> PasteResult {
         // Must precede any suspension: the clipboard monitor can poll during focus restoration.
         recordSelfWrite(count)
         guard mode == .paste else { return .copied }
@@ -149,6 +189,10 @@ public enum PasteResult: Equatable, Sendable {
         guard let code = client.pasteKeyCode() else { return .copiedPasteUnavailable }
         // Another process can replace the shared clipboard while focus is settling.
         guard client.changeCount() == count else { return .copiedPasteUnavailable }
+        if !requiresEditableTarget {
+            guard !Task.isCancelled, request == generation, client.isFrontmost(pid), client.changeCount() == count, client.isTrusted() else { return .copiedPasteUnavailable }
+            return client.sendPaste(code) ? .pasted : .copiedPasteUnavailable
+        }
         var editable = false
         for attempt in 0..<3 {
             guard !Task.isCancelled, request == generation, client.isFrontmost(pid),

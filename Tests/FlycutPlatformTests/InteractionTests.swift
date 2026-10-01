@@ -3,6 +3,19 @@ import FlycutCore
 @testable import FlycutPlatform
 
 @MainActor final class InteractionTests: XCTestCase {
+    func testImagePasteUsesStandardPasteAndRecordsOwnWrite() async {
+        var count = 1, recorded = 0, pasted = false, plain = false
+        let client = PasteClient(write: { _ in XCTFail("Image used text write"); return nil }, changeCount: { count }, isTrusted: { true }, activate: { _ in true }, waitForFocus: {}, isFrontmost: { _ in true }, isEditableTarget: { _ in true }, pasteKeyCode: { 9 }, sendPaste: { _ in pasted = true; return true }, sendPlainText: { _, _ in plain = true; return true }, writeImage: { bytes in XCTAssertEqual(bytes, Data([1])); count += 1; return count })
+        let service = PasteService(client: client, recordSelfWrite: { recorded = $0 })
+        let result = await service.copyOrPasteImage(Data([1]), mode: .paste, previousApp: 123)
+        XCTAssertEqual(result, .pasted); XCTAssertTrue(pasted); XCTAssertFalse(plain); XCTAssertEqual(recorded, count)
+    }
+    func testImageWithoutRecognizedTextDoesNotOverwritePlainClipboard() async {
+        let clip = Clip(id: UUID(), text: "", pasteboardType: "public.png", sourceAppName: nil, sourceBundleURL: nil, capturedAt: nil, collection: .recent, order: 0, image: .init(assetHash: "one", width: 1, height: 1, byteCount: 1))
+        let fixture = PasteFixture(trusted: true)
+        let result = await fixture.service.copyOrPaste(clip, plain: true, mode: .paste, previousApp: 123)
+        XCTAssertEqual(result, .clipboardUnavailable)
+    }
     func testCopyAndPasteSuppressMonitorCaptureEvenDuringFocusDelay() async {
         for mode in [PasteMode.copy, .paste] {
             let board = InteractionBoard()

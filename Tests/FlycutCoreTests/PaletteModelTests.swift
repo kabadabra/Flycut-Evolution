@@ -11,9 +11,11 @@ final class PaletteModelTests: XCTestCase {
         state.update(HistorySnapshot(recent: [a,b], favorites: [f]))
         state.select(b.id)
         state.query = "ALP"
+        state.setSearchResults(ClipSearch.search(state.query, in: state.filteredSourceClips).map(\.clip))
         XCTAssertEqual(state.clips.map(\.id), [a.id])
         XCTAssertEqual(state.selectedID, a.id)
         state.collection = .favorite
+        state.setSearchResults([])
         XCTAssertNil(state.selectedID)
         state.query = ""
         XCTAssertEqual(state.selectedID, f.id)

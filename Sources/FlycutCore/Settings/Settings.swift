@@ -16,7 +16,22 @@ public struct FlycutHotkey: Codable, Equatable, Sendable {
     }
 }
 
+public struct ExcludedApplication: Codable, Equatable, Sendable, Identifiable {
+    public var bundleIdentifier: String
+    public var displayName: String
+    public var id: String { bundleIdentifier }
+    public init(bundleIdentifier: String, displayName: String) {
+        self.bundleIdentifier = bundleIdentifier; self.displayName = displayName
+    }
+}
+
 public struct FlycutSettings: Codable, Equatable, Sendable {
+    public var excludedApplications: [ExcludedApplication] = []
+    public var automaticUpdateChecks = false
+    public var imageCaptureEnabled = true
+    public var imageRecognitionEnabled = true
+    public var imageSyncEnabled = false
+    public var imageStorageLimitMiB = 200
     public var rememberPause = false
     public var capturePaused = false
     public var appearance = "system"
@@ -25,6 +40,7 @@ public struct FlycutSettings: Codable, Equatable, Sendable {
     public var menuPreviewCount = 10
     public var previewCharacterCount = 40
     public var hotkey = FlycutHotkey(keyCode: 9, modifierFlags: 1_179_648)
+    public var historyHotkey = FlycutHotkey(keyCode: 9, modifierFlags: 1_572_864)
     public var saveMode = SaveMode.onQuit
     public var skipPasswordFields = true
     public var skipPasteboardTypes = true
@@ -54,6 +70,11 @@ public struct FlycutSettings: Codable, Equatable, Sendable {
     public init() {}
 
     public mutating func validate() {
+        imageStorageLimitMiB = min(2048, max(50, imageStorageLimitMiB))
+        var seen = Set<String>()
+        excludedApplications = excludedApplications.filter {
+            !$0.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && seen.insert($0.bundleIdentifier).inserted
+        }
         if !["system", "light", "dark"].contains(appearance) { appearance = "system" }
         if recentCapacity < 1 { recentCapacity = 40 }
         if favoriteCapacity < 1 { favoriteCapacity = 40 }
@@ -61,6 +82,9 @@ public struct FlycutSettings: Codable, Equatable, Sendable {
         if previewCharacterCount < 1 { previewCharacterCount = 40 }
         if !(0...127).contains(hotkey.keyCode) || hotkey.modifierFlags < 0 || hotkey.modifierFlags > 0xFFFF_FFFF {
             hotkey = FlycutHotkey(keyCode: 9, modifierFlags: 1_179_648)
+        }
+        if !(0...127).contains(historyHotkey.keyCode) || historyHotkey.modifierFlags < 0 || historyHotkey.modifierFlags > 0xFFFF_FFFF {
+            historyHotkey = FlycutHotkey(keyCode: 9, modifierFlags: 1_572_864)
         }
         bezelAlpha = bezelAlpha.isFinite ? min(max(bezelAlpha, 0), 1) : 0.25
         bezelWidth = bezelWidth.isFinite ? min(max(bezelWidth, 200), 1600) : 460

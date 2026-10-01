@@ -48,7 +48,7 @@ codesign --verify --strict --verbose=2 Flycut-Evolution.dmg
 xcrun stapler validate Flycut-Evolution.dmg
 spctl -a -t open --context context:primary-signature -vv Flycut-Evolution.dmg
 # After mounting the image, pass its actual app path:
-VERSION=1.0.1 REQUIRE_DEVELOPER_ID=1 REQUIRE_NOTARIZATION=1 \
+VERSION=1.0.2 REQUIRE_DEVELOPER_ID=1 REQUIRE_NOTARIZATION=1 \
   scripts/verify-app.sh '/Volumes/Flycut Evolution/Flycut Evolution.app'
 ```
 
@@ -59,3 +59,21 @@ VERSION=1.0.1 REQUIRE_DEVELOPER_ID=1 REQUIRE_NOTARIZATION=1 \
 After every gate passes, push the matching `vX.Y.Z` tag from the reviewed commit. Only the tag-push event may create a GitHub Release. The DMG contains **Flycut Evolution.app** and an Applications shortcut. Release notes include the exact matching changelog section, contributor credits, macOS requirements and migration instructions. Preserve the [v2.0.0 release](https://github.com/kabadabra/Flycut/releases/tag/v2.0.0) for older Macs.
 
 Flycut remains free and MIT licensed, maintained by Emerging Dynamics, with credit to TermiT/Flycut, Jumpcut and merged contributors. Cloud Sync is opt-in and uses the user's private iCloud database. The production Swift app shares the 2.0 identity: quit the old app, explicitly launch the new app, verify migration and backups, then remove the old `Flycut 2.0.app`. See the [upgrade guide](readme.md#moving-to-flycut-evolution).
+
+## Signed update releases
+
+The updater is pinned to Sparkle 2.10.0. The appcast URL is `https://github.com/kabadabra/Flycut-Evolution/releases/latest/download/appcast.xml`. Automatic checks default off. A missing feed is reported as unavailable until a release is published.
+
+`App/AppInfo.plist` contains only the public update key. `scripts/generate-update-keys.sh` creates/reuses a dedicated Keychain account, `com.edynamics.flycut.updates`, and refuses silent public-key rotation. The private key has not been exported into this repository. Back it up securely before relying on production updates; losing it requires a planned key rotation.
+
+For CI, set the repository secret `SPARKLE_PRIVATE_KEY` to the private update key through GitHub's secret UI. Use the pinned `generate_keys --account com.edynamics.flycut.updates -x <secure-file>` tool only when explicitly exporting for that purpose. Keep that file private, outside the repository, and remove it after securely transferring the secret. Never put it in a commit, release asset, log, or command-line argument. The generator passes CI key data to signing tools over standard input.
+
+Marketing version remains `CFBundleShortVersionString`; build ordering uses integer `CFBundleVersion`. The 1.0.2 production release uses build 10006. Local test builds used 10003–10005. Every future production release must use a greater build number and its own release tag. Set the number in AppInfo.plist before building, or pass BUILD_NUMBER for a local fixture. Verify the build number before publication.
+
+Release CI requires the update key in addition to Developer ID, profile, and notarization credentials. It packages the stapled application into an update ZIP, generates a signed appcast and signed Markdown notes, verifies signatures, and uploads them alongside the existing DMG. Publication remains tag-push only; a manual dispatch remains nonpublishing. `scripts/generate-appcast.sh <archive-directory> <https-download-prefix>` validates Developer ID/notarization for production ZIPs and does not publish anything.
+
+## Image CloudKit schema
+
+Before public image syncing, deploy record type `FlycutImage` in the existing `FlycutEvolution` private-database zone with a `payloadAsset` Asset field. Assets use CloudKit's built-in asset encryption. Keep the existing `FlycutClip` schema intact. Older builds skip the new record type. Do not expose clip contents in public-database records or analytics.
+
+Image sync is separately consented on every Mac. Production schema deployment and an actual two-Mac sync/real public updater round trip remain release validation steps; local tests cover transport encoding, validation, signatures, and consent filtering.

@@ -29,6 +29,9 @@ public actor CloudSyncController: CKSyncEngineDelegate {
     private let container: CKContainer?
     private let accountIdentity: AccountIdentity
     private let onRemote: RemoteHandler
+    private let onRemoteImages: @Sendable ([CloudImageEnvelope]) async -> Void
+    private let imageReader: @Sendable (String) async throws -> Data?
+    private var imageSyncEnabled: Bool
     private let onStatus: StatusHandler
     private let onAccountInvalidated: @Sendable () async -> Void
     private let requiresEntitlement: Bool
@@ -36,19 +39,24 @@ public actor CloudSyncController: CKSyncEngineDelegate {
     private var state: CloudSyncDiskState?
     private var engine: CKSyncEngine?
     private var active = false
+    private var fetchApplicationFailed = false
 
     public init(store: CloudSyncStateStore,
                 container: CKContainer? = nil,
                 accountIdentity: AccountIdentity? = nil,
                 onRemote: @escaping RemoteHandler,
                 onStatus: @escaping StatusHandler,
-                onAccountInvalidated: @escaping @Sendable () async -> Void = {}) {
+                onAccountInvalidated: @escaping @Sendable () async -> Void = {},
+                imageSyncEnabled: Bool = false,
+                imageReader: @escaping @Sendable (String) async throws -> Data? = { _ in nil },
+                onRemoteImages: @escaping @Sendable ([CloudImageEnvelope]) async -> Void = { _ in }) {
         self.store = store
         self.container = container
         self.requiresEntitlement = accountIdentity == nil
         self.accountIdentity = accountIdentity ?? {
             try await CKContainer(identifier: "iCloud.com.edynamics.flycut").userRecordID().recordName
         }
+        self.imageSyncEnabled = imageSyncEnabled; self.imageReader = imageReader; self.onRemoteImages = onRemoteImages
         self.onRemote = onRemote
         self.onStatus = onStatus
         self.onAccountInvalidated = onAccountInvalidated
@@ -73,10 +81,11 @@ public actor CloudSyncController: CKSyncEngineDelegate {
         var next: CloudSyncDiskState
         if let prior, prior.accountID == account { next = prior }
         else { next = CloudSyncDiskState(accountID: account, ledger: CloudSyncLedger(deviceID: UUID().uuidString)) }
-        _ = next.ledger.recordLocal(snapshot, at: Date())
-        let recovered = next.ledger.applyRemote([], to: snapshot, at: Date())
+        _ = next.ledger.recordLocal(snapshot, at: Date(), includeImages: imageSyncEnabled)
+        let recovered = next.ledger.applyRemote([], to: snapshot, at: Date(), includeImages: imageSyncEnabled)
         try store.save(next)
         state = next
+        fetchApplicationFailed = next.unappliedDownloads == true
         active = true
         return recovered
     }
@@ -102,7 +111,7 @@ public actor CloudSyncController: CKSyncEngineDelegate {
 
     public func recordLocal(_ snapshot: HistorySnapshot) async throws {
         guard active, var next = state else { return }
-        let changed = next.ledger.recordLocal(snapshot, at: Date())
+        let changed = next.ledger.recordLocal(snapshot, at: Date(), includeImages: imageSyncEnabled)
         guard !changed.isEmpty else { return }
         try store.save(next)
         state = next
@@ -112,19 +121,79 @@ public actor CloudSyncController: CKSyncEngineDelegate {
 
     public func mergeRemote(_ remote: [CloudClipEntry], into snapshot: HistorySnapshot,
                             apply: @Sendable (HistorySnapshot) async throws -> Void) async throws -> HistorySnapshot {
+        try await mergeRemoteApplied(remote, into: snapshot) { merged in
+            try await apply(merged)
+            return merged
+        }
+    }
+    /// Persist the bounded collection and its eviction tombstones together in the
+    /// sync journal; omitted overflow must not be reintroduced by another fetch.
+    public func mergeRemoteApplied(_ remote: [CloudClipEntry], into snapshot: HistorySnapshot,
+                                   apply: @Sendable (HistorySnapshot) async throws -> HistorySnapshot) async throws -> HistorySnapshot {
         guard active, var next = state else { return snapshot }
-        let merged = next.ledger.applyRemote(remote, to: snapshot, at: Date())
-        // Keep SQLite ahead of the journal. If the process exits between these
-        // writes, prepare() will detect and re-queue the local difference.
-        try await apply(merged)
-        try store.save(next)
-        state = next
-        queuePendingChanges()
-        return merged
+        let merged = next.ledger.applyRemote(remote, to: snapshot, at: Date(), includeImages: imageSyncEnabled)
+        do {
+            let retained = try await apply(merged)
+            _ = next.ledger.recordLocal(retained, at: Date(), includeImages: imageSyncEnabled)
+            try store.save(next)
+            state = next
+            queuePendingChanges()
+            return retained
+        } catch {
+            fetchApplicationFailed = true
+            if var failureState = state {
+                failureState.unappliedDownloads = true
+                try? store.save(failureState)
+                state = failureState
+            }
+            await onStatus(.error("Cloud Sync could not apply downloaded history. Check the history or image storage limit. Local history is available."))
+            throw error
+        }
+    }
+    func completeFetchAttempt() async {
+        guard var next = state else { return }
+        guard !fetchApplicationFailed else {
+            next.unappliedDownloads = true
+            do { try store.save(next); state = next } catch {}
+            await onStatus(.error("Some downloaded history was not applied. Increase the image limit if needed, then choose Sync Now to retry."))
+            return
+        }
+        next.lastSuccess = Date()
+        do { try store.save(next); state = next; await onStatus(.upToDate(next.lastSuccess)) }
+        catch { await onStatus(.error("Cloud Sync state could not be saved.")) }
     }
 
+    func completeUploadAttempt() async {
+        await completeFetchAttempt()
+    }
+
+    public func setImageSyncEnabled(_ enabled: Bool) async throws {
+        guard enabled != imageSyncEnabled else { return }
+        imageSyncEnabled = enabled
+        if let engine, let state {
+            let pendingImages = engine.state.pendingRecordZoneChanges.filter { change in
+                switch change {
+                case .saveRecord(let id), .deleteRecord(let id): return UUID(uuidString: id.recordName).map { state.ledger.entries[$0]?.isImage == true } ?? false
+                @unknown default: return false
+                }
+            }
+            engine.state.remove(pendingRecordZoneChanges: pendingImages)
+            if enabled {
+                // Previously skipped image records need a fresh fetch cursor.
+                var next = state; next.engineState = nil; next.unappliedDownloads = nil
+                try store.save(next); self.state = next; fetchApplicationFailed = false
+                self.engine = nil; try await activate()
+            }
+        }
+    }
     public func syncNow() async throws {
-        guard active, let engine else { throw CloudSyncError.notPrepared }
+        guard active else { throw CloudSyncError.notPrepared }
+        if fetchApplicationFailed, var next = state {
+            next.engineState = nil; next.unappliedDownloads = nil
+            try store.save(next); state = next; fetchApplicationFailed = false
+            self.engine = nil; try await activate()
+        }
+        guard let engine else { throw CloudSyncError.notPrepared }
         try await engine.fetchChanges()
         try await engine.sendChanges()
     }
@@ -133,7 +202,7 @@ public actor CloudSyncController: CKSyncEngineDelegate {
 
     private func queuePendingChanges(ids: [UUID]? = nil) {
         guard let engine, let state else { return }
-        let changes = (ids ?? Array(state.ledger.pendingIDs)).map { id in
+        let changes = (ids ?? Array(state.ledger.pendingIDs)).filter { imageSyncEnabled || state.ledger.entries[$0]?.isImage != true }.map { id in
             CKSyncEngine.PendingRecordZoneChange.saveRecord(CKRecord.ID(recordName: id.uuidString, zoneID: zoneID))
         }
         if !changes.isEmpty { engine.state.add(pendingRecordZoneChanges: changes) }
@@ -169,15 +238,30 @@ public actor CloudSyncController: CKSyncEngineDelegate {
     public func nextRecordZoneChangeBatch(_ context: CKSyncEngine.SendChangesContext,
                                           syncEngine: CKSyncEngine) async -> CKSyncEngine.RecordZoneChangeBatch? {
         guard await checkAccount(), let state else { return nil }
-        let changes = syncEngine.state.pendingRecordZoneChanges.filter { context.options.scope.contains($0) }
+        let changes = syncEngine.state.pendingRecordZoneChanges.filter { change in
+            guard context.options.scope.contains(change) else { return false }
+            switch change {
+            case .saveRecord(let id), .deleteRecord(let id): return imageSyncEnabled || UUID(uuidString: id.recordName).map { state.ledger.entries[$0]?.isImage != true } == true
+            @unknown default: return false
+            }
+        }
         guard !changes.isEmpty else { return nil }
         let entries = state.ledger.entries
         let fields = state.systemFields
+        let imageReader = self.imageReader
         let assetDirectory = store.url.deletingLastPathComponent().appendingPathComponent("Cloud Assets", isDirectory: true)
         return await CKSyncEngine.RecordZoneChangeBatch(pendingChanges: changes) { id in
             guard let uuid = UUID(uuidString: id.recordName), let entry = entries[uuid] else { return nil }
             do {
                 let base = Self.decodeSystemFields(fields[uuid])
+                if entry.isImage {
+                    let asset: ImageAsset?
+                    if let hash = entry.clip?.image?.assetHash {
+                        guard let png = try await imageReader(hash) else { return nil }
+                        asset = .init(hash: hash, png: png)
+                    } else { asset = nil }
+                    return try CloudImageCodec.record(for: .init(entry: entry, asset: asset), zoneID: id.zoneID, assetDirectory: assetDirectory, baseRecord: base)
+                }
                 return try CloudRecordCodec.record(for: entry, zoneID: id.zoneID,
                                                    assetDirectory: assetDirectory, baseRecord: base)
             } catch { return nil }
@@ -206,18 +290,28 @@ public actor CloudSyncController: CKSyncEngineDelegate {
 
         case .fetchedRecordZoneChanges(let changes):
             var remote: [CloudClipEntry] = []
+            var images: [CloudImageEnvelope] = []
             for modification in changes.modifications where modification.record.recordID.zoneID == zoneID {
+                if modification.record.recordType == CloudImageCodec.recordType {
+                    if imageSyncEnabled {
+                        do { images.append(try CloudImageCodec.envelope(from: modification.record)) }
+                        catch { fetchApplicationFailed = true; await onStatus(.error("A cloud image could not be read.")) }
+                    }
+                    continue
+                }
                 do { remote.append(try CloudRecordCodec.entry(from: modification.record)) }
-                catch { await onStatus(.error("A cloud clipping could not be read.")) }
+                catch { fetchApplicationFailed = true; await onStatus(.error("A cloud clipping could not be read.")) }
             }
             for deletion in changes.deletions where deletion.recordID.zoneID == zoneID {
+                if deletion.recordType == CloudImageCodec.recordType && !imageSyncEnabled { continue }
                 if let id = UUID(uuidString: deletion.recordID.recordName) {
-                    remote.append(CloudClipEntry(id: id, clip: nil, changedAt: Date(), origin: "cloud-deletion"))
+                    remote.append(CloudClipEntry(id: id, clip: nil, changedAt: Date(), origin: "cloud-deletion", imageRecord: deletion.recordType == CloudImageCodec.recordType ? true : nil))
                 }
             }
+            if !images.isEmpty { await onRemoteImages(images) }
             if !remote.isEmpty { await onRemote(remote) }
             do { try saveFetchedSystemFields(changes.modifications.map(\.record)) }
-            catch { await onStatus(.error("Cloud Sync could not save downloaded record state.")) }
+            catch { fetchApplicationFailed = true; await onStatus(.error("Cloud Sync could not save downloaded record state.")) }
 
         case .sentRecordZoneChanges(let sent):
             guard var next = state else { return }
@@ -225,21 +319,24 @@ public actor CloudSyncController: CKSyncEngineDelegate {
             for saved in sent.savedRecords {
                 guard let id = UUID(uuidString: saved.recordID.recordName) else { continue }
                 next.systemFields[id] = Self.encodeSystemFields(saved)
-                if let sentEntry = try? CloudRecordCodec.entry(from: saved), next.ledger.entries[id] == sentEntry {
+                if let sentEntry = Self.entryFromAnyRecord(saved), next.ledger.entries[id] == sentEntry {
                     acknowledged.append(id)
                 }
                 if let asset = saved["payloadAsset"] as? CKAsset { removeOwnedAsset(asset.fileURL) }
             }
             next.ledger.acknowledge(acknowledged)
-            next.lastSuccess = Date()
-            do { try store.save(next); state = next; await onStatus(.upToDate(next.lastSuccess)) }
-            catch { await onStatus(.error("Cloud Sync state could not be saved.")) }
+            do {
+                try store.save(next); state = next
+                if sent.failedRecordSaves.isEmpty || fetchApplicationFailed { await completeUploadAttempt() }
+            } catch { await onStatus(.error("Cloud Sync state could not be saved.")) }
             for failure in sent.failedRecordSaves {
                 if let asset = failure.record["payloadAsset"] as? CKAsset { removeOwnedAsset(asset.fileURL) }
                 if failure.error.code == .serverRecordChanged, let server = failure.error.serverRecord {
-                    if let entry = try? CloudRecordCodec.entry(from: server) { await onRemote([entry]) }
+                    if server.recordType == CloudImageCodec.recordType {
+                        if imageSyncEnabled, let image = try? CloudImageCodec.envelope(from: server) { await onRemoteImages([image]) }
+                    } else if let entry = try? CloudRecordCodec.entry(from: server) { await onRemote([entry]) }
                     do { try saveFetchedSystemFields([server]) }
-                    catch { await onStatus(.error("Cloud Sync could not save downloaded record state.")) }
+                    catch { fetchApplicationFailed = true; await onStatus(.error("Cloud Sync could not save downloaded record state.")) }
                 }
                 if failure.error.code == .zoneNotFound {
                     syncEngine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
@@ -256,20 +353,25 @@ public actor CloudSyncController: CKSyncEngineDelegate {
             if !sent.failedZoneSaves.isEmpty { await onStatus(.error("Cloud history could not be created.")) }
 
         case .didFetchChanges:
-            guard var next = state else { return }
-            next.lastSuccess = Date()
-            do { try store.save(next); state = next; await onStatus(.upToDate(next.lastSuccess)) }
-            catch { await onStatus(.error("Cloud Sync state could not be saved.")) }
+            await completeFetchAttempt()
 
         case .didFetchRecordZoneChanges(let finished):
-            if finished.error != nil { await onStatus(.error("Cloud Sync could not fetch changes. It will retry.")) }
+            if finished.error != nil { fetchApplicationFailed = true; await onStatus(.error("Cloud Sync could not fetch changes. It will retry.")) }
 
-        case .willFetchChanges, .willFetchRecordZoneChanges, .willSendChanges, .didSendChanges:
+        case .willFetchChanges:
             await onStatus(.syncing)
+        case .willFetchRecordZoneChanges, .willSendChanges:
+            await onStatus(.syncing)
+        case .didSendChanges:
+            if fetchApplicationFailed || state?.ledger.pendingIDs.isEmpty == true { await completeUploadAttempt() }
         @unknown default: break
         }
     }
 
+    private static func entryFromAnyRecord(_ record: CKRecord) -> CloudClipEntry? {
+        if record.recordType == CloudImageCodec.recordType { return (try? CloudImageCodec.envelope(from: record))?.entry }
+        return try? CloudRecordCodec.entry(from: record)
+    }
     private func removeOwnedAsset(_ url: URL?) {
         guard let url, url.pathExtension == "upload",
               url.deletingLastPathComponent().standardizedFileURL == store.url.deletingLastPathComponent()

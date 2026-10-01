@@ -1,18 +1,24 @@
 import Foundation
 
 public struct PaletteSelection: Sendable {
-    public var query = "" { didSet { reconcile() } }
-    public var collection = CollectionKind.recent { didSet { reconcile() } }
+    public var query = "" { didSet { searchClips = nil; if query.isEmpty { reconcile() } } }
+    public var collection = CollectionKind.recent { didSet { searchClips = nil; if query.isEmpty { reconcile() } } }
     public var wraparound = false
     public private(set) var selectedID: UUID?
+    public private(set) var snapshotRevision = UUID()
     private var snapshot = HistorySnapshot(recent: [], favorites: [])
     public init() {}
+    private var searchClips: [Clip]?
+    public var allClips: [Clip] { snapshot.favorites + snapshot.recent }
+    public var filteredSourceClips: [Clip] { collection == .favorite ? snapshot.favorites : allClips }
     public var clips: [Clip] {
-        let list = collection == .recent ? snapshot.recent : snapshot.favorites
-        return query.isEmpty ? list : list.filter { $0.text.localizedStandardContains(query) }
+        if !query.isEmpty { return searchClips ?? [] }
+        return collection == .favorite ? snapshot.favorites : Array(snapshot.favorites.prefix(5)) + snapshot.recent
     }
+    public func clip(id: UUID) -> Clip? { allClips.first { $0.id == id } }
+    public mutating func setSearchResults(_ clips: [Clip]) { searchClips = clips; reconcile() }
     public var selected: Clip? { clips.first { $0.id == selectedID } }
-    public mutating func update(_ snapshot: HistorySnapshot) { self.snapshot = snapshot; reconcile() }
+    public mutating func update(_ snapshot: HistorySnapshot) { self.snapshot = snapshot; snapshotRevision = UUID(); searchClips = nil; if query.isEmpty { reconcile() } }
     public mutating func select(_ id: UUID?) { selectedID = id; reconcile() }
     public mutating func move(_ distance: Int) {
         let list = clips
@@ -33,6 +39,7 @@ public struct PaletteSelection: Sendable {
 }
 
 public enum PaletteCommand: Equatable, Sendable {
+    case activateID(UUID)
     case activate, activatePlain, dismiss, favorite, switchCollection, exportSelected, exportAll, delete, next, previous, digit(Int), copyToTop(UUID)
     public static func resolve(keyCode: UInt16, key: String, editingSearch: Bool) -> Self? {
         if keyCode == 53 { return .dismiss }

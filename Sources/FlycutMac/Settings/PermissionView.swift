@@ -11,6 +11,6 @@ struct PermissionView: View {
                 Button("Refresh") { trusted = AccessibilityService().isTrusted }
             }
             Text("Flycut reads changed text copies and available RTF formatting while capture is running. Pause capture from the palette whenever needed. No clipboard content is sent to analytics.").font(.caption)
-        }
+        }.onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in trusted = AccessibilityService().isTrusted }
     }
 }

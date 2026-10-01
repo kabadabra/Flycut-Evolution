@@ -1,6 +1,7 @@
 import AppKit
 import OSLog
 import SwiftUI
+import Combine
 import FlycutCore
 import FlycutPlatform
 
@@ -11,8 +12,14 @@ import FlycutPlatform
     private let repository: SQLiteHistoryRepository
     private var persistence: HistoryPersistence?
     private(set) var history: HistoryService
+    private let wasEstablishedInstallation: Bool
+    private var setupWindow: NSWindow?
+    private var updaterSubscription: AnyCancellable?
+    private var updater: UpdateService?
+    private var recognition: ImageRecognitionCoordinator?
     private var monitor: ClipboardMonitor!
     private var hotkey: HotkeyService!
+    private var historyHotkey: HotkeyService!
     private var paste: PasteService!
     private var shell: MenuBarController!
     private var pasteTargets = PasteTargetHistory(ownProcessID: ProcessInfo.processInfo.processIdentifier)
@@ -23,6 +30,7 @@ import FlycutPlatform
     private var cloudStatus: CloudSyncStatus = .off
     private var snapshot = HistorySnapshot(recent: [], favorites: [])
     private var registeredHotkey: FlycutHotkey?
+    private var registeredHistoryHotkey: FlycutHotkey?
     private let accessibility = AccessibilityService()
     private var terminating = false
     private let login: LoginItemService
@@ -60,6 +68,8 @@ import FlycutPlatform
             fatalError("Unable to initialize isolated settings storage")
         }
         settingsStore = SettingsStore(defaults: defaults)
+        let existingDirectory = storageDirectory ?? (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false))?.appendingPathComponent(bundleIdentity)
+        wasEstablishedInstallation = settingsStore.isEstablishedInstallation || existingDirectory.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent("history.sqlite").path) } == true
         settings = settingsStore.load()
         do { self.repository = try repository ?? SQLiteHistoryRepository() }
         catch { fatalError("Unable to initialize private history storage") }
@@ -87,17 +97,53 @@ import FlycutPlatform
             MainActor.assumeIsolated { self?.pasteTargets.observeActivation(processID: processID) }
         }
         pasteTargets.observeActivation(processID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        updater = UpdateService()
+        updater?.configure(automaticChecks: settings.automaticUpdateChecks)
+        updater?.start()
+        updaterSubscription = updater?.$message.sink { [weak self] message in
+            if let message { self?.model.message = message; self?.settingsEditor?.message = message }
+        }
         monitor = ClipboardMonitor(settings: { [weak self] in self?.settings ?? FlycutSettings() },
                                    onClip: { [weak self] clip in
             self?.enqueue { coordinator in
                 _ = try await coordinator.history.capture(clip)
             }
         }, onAccessDenied: { [weak self] in self?.model.message = "Clipboard access was denied. Check macOS Privacy settings." })
+        monitor.onImage = { [weak self] clip, asset in
+            guard let self else { return }
+            let task = enqueue { owner in
+                _ = try await owner.history.captureImage(asset, clip: clip, budgetBytes: owner.settings.imageStorageLimitMiB * 1024 * 1024)
+            }
+            Task { [weak self] in await task.value; self?.recognition?.enqueue(clip) }
+        }
+        monitor.onImageRejected = { [weak self] in self?.model.message = "Image was not captured: invalid image, over 16 MiB, or over 24 million pixels." }
+        monitor.onStateChange = { [weak self] state in
+            guard let self else { return }
+            recognition?.setPaused(state.isPaused)
+            model.captureState = state; model.isPaused = state.isPaused
+            settings.capturePaused = state.pause == .manual
+            settingsStore.save(settings)
+        }
+        model.images = ImagePreviewModel(read: { [repository] hash in try await repository.imageData(for: hash) })
+        recognition = ImageRecognitionCoordinator(read: { [repository] hash in try await repository.imageData(for: hash) }, eligible: { [weak self] clip in
+            guard let self else { return false }
+            return settings.imageRecognitionEnabled && model.selection.allClips.contains(where: { $0.id == clip.id && $0.image?.assetHash == clip.image?.assetHash }) && !settings.excludedApplications.contains(where: { $0.bundleIdentifier == clip.sourceBundleIdentifier })
+        }, apply: { [weak self] id, hash, text, state in
+            guard let self else { return }
+            let task = enqueue { owner in
+                guard owner.settings.imageRecognitionEnabled,
+                      let clip = owner.model.selection.allClips.first(where: { $0.id == id }),
+                      !owner.settings.excludedApplications.contains(where: { $0.bundleIdentifier == clip.sourceBundleIdentifier }) else { return }
+                _ = try await owner.history.updateRecognition(id: id, assetHash: hash, text: text, state: state)
+            }
+            await task.value
+        })
         paste = PasteService { [weak self] count in self?.monitor.recordSelfWrite(changeCount: count) }
         shell = MenuBarController(model: model)
         shell.willPresent = { [weak self] in self?.preparePresentation() }
-        shell.didDismiss = { [weak self] in self?.pasteTask?.cancel() }
+        shell.didDismiss = { [weak self] in self?.pasteTask?.cancel(); self?.model.cancelPresentation() }
         hotkey = HotkeyService { [weak self] in self?.pasteCurrentClipboardAsPlainText() }
+        historyHotkey = HotkeyService(client: CarbonHotkeyClient(identifier: 2)) { [weak self] in self?.shell.togglePalette() }
         model.isPaused = settings.rememberPause && settings.capturePaused
         monitor.isPaused = model.isPaused
         sessionStartedNever = settings.saveMode == .never
@@ -114,6 +160,7 @@ import FlycutPlatform
                     coordinator.persistence = persistence
                     try await persistence.restore(into: coordinator.repository)
                     _ = try await coordinator.history.normalizeRecents(backupTo: try coordinator.deduplicationBackupURL())
+                    _ = try await coordinator.history.enforceCapacities(backupTo: coordinator.capacityBackupURL())
                 } catch {
                     coordinator.model.storageWarning = "Saved history could not be loaded and has been left untouched. Capture will continue in memory only for this session. Export any new clippings before quitting; repair or restore the saved database before relaunching."
                 }
@@ -135,8 +182,12 @@ import FlycutPlatform
                 }
             }
             coordinator.monitor.start()
+            let current = try await coordinator.repository.snapshot()
+            coordinator.model.updateSnapshot(current)
+            for clip in current.recent + current.favorites where clip.image?.recognitionState == .pending { coordinator.recognition?.enqueue(clip) }
             do {
                 if try await coordinator.shouldOfferMigration() { coordinator.openImport(discover: true) }
+                else if !coordinator.wasEstablishedInstallation && !coordinator.settingsStore.loadSetup().handled { coordinator.openSetup() }
             } catch {
                 coordinator.model.storageWarning = "Previous migration status could not be read. Saved history was left untouched. Use Settings to retry saved history or review an explicit import."
             }
@@ -162,11 +213,38 @@ import FlycutPlatform
                 }
             }
         }
-        value.capturePaused = model.isPaused
+        if let historyHotkey, registeredHistoryHotkey != value.historyHotkey {
+            if value.historyHotkey == value.hotkey {
+                value.historyHotkey = registeredHistoryHotkey ?? settings.historyHotkey
+                model.message = "Choose different shortcuts for Open History and plain-text paste."
+            } else {
+                do { try historyHotkey.register(value.historyHotkey); registeredHistoryHotkey = value.historyHotkey }
+                catch {
+                    registeredHistoryHotkey = historyHotkey.currentShortcut
+                    if let previous = registeredHistoryHotkey { value.historyHotkey = previous }
+                    model.message = registeredHistoryHotkey == nil ? "Open History shortcut unavailable. Choose another shortcut in Settings." : "Open History shortcut unavailable. Your previous shortcut is still active."
+                }
+            }
+        }
+        value.capturePaused = monitor?.captureState.pause == .manual
         if value.saveMode == .never { sessionStartedNever = true }
+        let recognitionEnabledChanged = !settings.imageRecognitionEnabled && value.imageRecognitionEnabled
+        let imageBudgetChanged = settings.imageStorageLimitMiB != value.imageStorageLimitMiB
+        let imageSyncChanged = settings.imageSyncEnabled != value.imageSyncEnabled
         settings = value
+        if imageSyncChanged { enqueue { owner in
+            try await owner.cloudSync?.setImageSyncEnabled(owner.settings.imageSyncEnabled)
+            try await owner.cloudSync?.recordLocal(owner.repository.snapshot())
+        } }
+        if imageBudgetChanged { enqueue { owner in
+            if try await !owner.repository.trimImageBudget(to: owner.settings.imageStorageLimitMiB * 1024 * 1024, archive: owner.settings.saveForgottenClippings && owner.settings.saveMode != .never ? owner.settings.autoSaveToLocation.map(EvictionArchive.init) : nil) { owner.model.message = "Image favorites exceed the storage limit. Increase the limit or remove image favorites." }
+        } }
         settingsStore.save(value)
+        updater?.configure(automaticChecks: value.automaticUpdateChecks)
         model.apply(value)
+        recognition?.setEnabled(value.imageRecognitionEnabled)
+        if recognitionEnabledChanged { for clip in model.selection.allClips where clip.image?.recognitionState == .pending { recognition?.enqueue(clip) } }
+        recognition?.invalidateDisallowedSources(Set(value.excludedApplications.map(\.bundleIdentifier)))
         history = HistoryService(repository: repository, recentCapacity: value.recentCapacity, favoriteCapacity: value.favoriteCapacity,
                                  archive: value.saveMode == .never ? nil : value.autoSaveToLocation.map(EvictionArchive.init),
                                  archiveRecents: value.saveForgottenClippings, archiveFavorites: value.saveForgottenFavorites)
@@ -177,9 +255,11 @@ import FlycutPlatform
         model.perform = { [weak self] in self?.perform($0) }
         model.pause = { [weak self] in
             guard let self else { return }
-            model.isPaused.toggle(); monitor.isPaused = model.isPaused
-            settings.capturePaused = model.isPaused; settingsStore.save(settings)
+            if monitor.isPaused { monitor.resumeCapture() } else { monitor.pause(for: nil) }
         }
+        model.pauseFor = { [weak self] in self?.monitor.pause(for: $0) }
+        model.ignoreNextCopy = { [weak self] in self?.monitor.ignoreNextCopy() }
+        model.cancelIgnoreNextCopy = { [weak self] in self?.monitor.cancelIgnoreNextCopy() }
         model.clear = { [weak self] in self?.enqueue { _ = try await $0.history.clearRecents() } }
         model.settings = { [weak self] in
             guard let self else { return }
@@ -191,6 +271,32 @@ import FlycutPlatform
             NSApp.activate(ignoringOtherApps: true)
         }
         model.accessibility = { [weak self] in self?.accessibility.openSettings() }
+        model.saveFavorite = { [weak self] id, edit in
+            guard let self else { throw HistoryError.database("App unavailable") }
+            try await self.mutateFavorite { _ = try await $0.history.updateFavorite(id: id, edit: edit) }
+        }
+        model.moveFavorite = { [weak self] id, offset in
+            guard let self else { throw HistoryError.database("App unavailable") }
+            try await self.mutateFavorite { _ = try await $0.history.moveFavorite(id: id, offset: offset) }
+        }
+        model.copyExtractedText = { [weak self] id in
+            guard let self, let text = model.selection.clip(id: id)?.image?.recognizedText, !text.isEmpty else { self?.model.message = "No recognized text is available yet."; return }
+            Task { [weak self] in
+                guard let self else { return }
+                reportPasteResult(await paste.copyOrPaste(text, mode: .copy, previousApp: nil))
+            }
+        }
+        model.retryRecognition = { [weak self] id in
+            guard let self, let clip = model.selection.clip(id: id) else { return }
+            guard settings.imageRecognitionEnabled else { model.message = "Enable local text recognition in Images settings."; return }
+            recognition?.cancel(id: id); recognition?.enqueue(clip)
+        }
+        model.showSetup = { [weak self] in self?.openSetup() }
+        model.checkForUpdates = { [weak self] in
+            guard let self else { return }
+            updater?.checkForUpdates()
+            model.message = updater?.message
+        }
         model.quit = { NSApp.terminate(nil) }
     }
     private func preparePresentation() {
@@ -205,6 +311,8 @@ import FlycutPlatform
         case .previous: model.selection.move(-1)
         case .digit(let value): model.selection.selectDigit(value)
         case .dismiss: shell.dismiss()
+        case .activateID(let id):
+            if let clip = model.selection.clip(id: id) { copyOrPaste(.paste, plain: false, explicitClip: clip) }
         case .activate: copyOrPaste(.paste, plain: false)
         case .activatePlain: copyOrPaste(.paste, plain: true)
         case .copyToTop(let id):
@@ -212,7 +320,10 @@ import FlycutPlatform
             copyOrPaste(.copy, plain: false, forceMoveToTop: true)
         case .favorite:
             guard let clip = model.selection.selected, clip.collection == .recent else { return }
-            enqueue { _ = try await $0.history.favorite(id: clip.id) }
+            Task {
+                do { try await mutateFavorite { _ = try await $0.history.favorite(id: clip.id) } }
+                catch { model.message = "Favorite could not be saved. Existing favorites are unchanged." }
+            }
         case .switchCollection: model.selection.collection = model.selection.collection == .recent ? .favorite : .recent
         case .delete:
             guard let clip = model.selection.selected else { return }
@@ -221,8 +332,8 @@ import FlycutPlatform
         case .exportAll: export(model.selection.collection == .recent ? snapshot.recent : snapshot.favorites)
         }
     }
-    private func copyOrPaste(_ mode: PasteMode, plain: Bool, forceMoveToTop: Bool = false) {
-        guard let clip = model.selection.selected else { return }
+    private func copyOrPaste(_ mode: PasteMode, plain: Bool, forceMoveToTop: Bool = false, explicitClip: Clip? = nil) {
+        guard let clip = explicitClip ?? model.selection.selected else { return }
         pasteTask?.cancel()
         pasteTargets.observeActivation(processID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
         let target = pasteTargets.previousExternalApp
@@ -231,10 +342,17 @@ import FlycutPlatform
         } else if !settings.stickyPalette { shell.dismiss() }
         pasteTask = Task { [weak self] in
             guard let self, !Task.isCancelled else { return }
-            let result = await paste.copyOrPaste(clip, plain: plain, mode: mode, previousApp: target)
+            let result: PasteResult
+            if let image = clip.image, !plain {
+                guard let png = try? await repository.imageData(for: image.assetHash), !Task.isCancelled else { model.message = "Image could not be loaded."; return }
+                result = await paste.copyOrPasteImage(png, mode: mode, previousApp: target)
+            } else { result = await paste.copyOrPaste(clip, plain: plain, mode: mode, previousApp: target) }
             guard !Task.isCancelled else { return }
-            reportPasteResult(result)
-            if (forceMoveToTop || settings.pasteMovesToTop), result != .writeFailed {
+            if result == .clipboardUnavailable, clip.files?.isEmpty == false, clip.image == nil {
+                model.message = "File is no longer available at its original path. You can still copy its name or path from the preview."
+                shell.showPalette()
+            } else { reportPasteResult(result) }
+            if clip.collection == .recent, (forceMoveToTop || settings.pasteMovesToTop), result != .writeFailed && result != .clipboardUnavailable {
                 enqueue { _ = try await $0.history.moveToTop(id: clip.id) }
             }
         }
@@ -300,14 +418,18 @@ import FlycutPlatform
     }
     private func export(_ clips: [Clip]) {
         guard !clips.isEmpty else { return }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Flycut.txt"
-        panel.directoryURL = settings.saveToLocation
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try clips.reversed().map(\.text).joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
-            model.message = "Export saved."
-        } catch { model.message = "Unable to save the export. Choose another location." }
+        Task {
+            do {
+                let assets = try await repository.exportAssets(for: .init(recent: clips, favorites: []))
+                let value = try ClipExport.make(clips, assets: assets)
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = value.filename
+                panel.directoryURL = settings.saveToLocation
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                try value.data.write(to: url, options: .atomic)
+                model.message = "Export saved."
+            } catch { model.message = "Unable to save the export. Choose another location." }
+        }
     }
     /// Serialize capture and UI writes; shutdown waits for the same queue before persisting.
     @discardableResult
@@ -320,23 +442,44 @@ import FlycutPlatform
             do {
                 try await operation(self)
                 snapshot = try await repository.snapshot()
-                model.selection.update(snapshot)
+                model.updateSnapshot(snapshot)
                 if settings.saveMode == .afterEachClip { try await persist(snapshot) }
                 if recordForSync && settings.cloudSyncEnabled {
                     do { try await cloudSync?.recordLocal(snapshot) }
                     catch { setCloudStatus(.error("Cloud Sync could not save a change. Local history is safe.")) }
                 }
-            } catch { model.message = "History could not be updated or saved. Check the automatic export folder and saved-history access, then try again." }
+            } catch {
+                if case HistoryError.database(let detail) = error, (detail.hasPrefix("Image favorites") || detail.hasPrefix("Synced images")) { model.message = detail }
+                else { model.message = "History could not be updated or saved. Check the automatic export folder and saved-history access, then try again." }
+            }
         }
         return mutationTask!
     }
-    private func persist(_ snapshot: HistorySnapshot) async throws {
-        guard settings.saveMode != .never else { return }
-        guard let persistence, try await persistence.save(snapshot) else {
+    private func mutateFavorite(_ operation: @escaping @MainActor (AppCoordinator) async throws -> Void) async throws {
+        let previous = mutationTask
+        let task = Task { @MainActor in
+            await previous?.value
+            let after = try await FavoriteMutation.perform(repository: repository, operation: {
+                try await operation(self)
+            }, persist: { value in
+                if self.settings.saveMode == .afterEachClip { try await self.persist(value) }
+            })
+            snapshot = after; model.updateSnapshot(after)
+            if settings.cloudSyncEnabled {
+                do { try await cloudSync?.recordLocal(after) }
+                catch { setCloudStatus(.error("Cloud Sync could not save a change. Local history is safe.")) }
+            }
+        }
+        mutationTask = Task { _ = try? await task.value }
+        try await task.value
+    }
+    private func persist(_ snapshot: HistorySnapshot, mode: SaveMode? = nil) async throws {
+        guard (mode ?? settings.saveMode) != .never else { return }
+        guard let persistence, try await persistence.save(snapshot, assets: repository.exportAssets(for: snapshot)) else {
             if model.storageWarning == nil {
                 model.storageWarning = "This session is running in memory only. Saved history has not been replaced. Export new clippings before quitting."
             }
-            return
+            throw HistoryError.database("Saved history is unavailable")
         }
     }
 
@@ -350,15 +493,34 @@ import FlycutPlatform
         settingsEditor?.cloudStatus = status
     }
 
-    /// A receiving Mac may have a smaller limit than the synced collection.
-    /// Preserve that collection before its next local capture applies the cap.
-    func acceptSyncedHistory(_ merged: HistorySnapshot) async throws {
-        try await repository.replaceAll(merged)
-        if settings.saveMode == .afterEachClip { try await persist(merged) }
-        var adopted = settings
-        adopted.recentCapacity = max(adopted.recentCapacity, merged.recent.count)
-        adopted.favoriteCapacity = max(adopted.favoriteCapacity, merged.favorites.count)
-        if adopted != settings { configure(adopted) }
+    /// Reject an oversized image collection without local evictions or remote tombstones.
+    @discardableResult
+    func acceptSyncedHistory(_ merged: HistorySnapshot, assets: [ImageAsset] = []) async throws -> HistorySnapshot {
+        var retained = merged
+        retained.recent = Array(merged.recent.prefix(settings.recentCapacity))
+        retained.favorites = Array(merged.favorites.prefix(settings.favoriteCapacity))
+        if retained != merged && settings.saveMode != .never {
+            let existing = try await repository.exportAssets(for: repository.snapshot())
+            let all = Dictionary((existing + assets).map { ($0.hash, $0) }, uniquingKeysWith: { _, incoming in incoming })
+            let hashes = Set((merged.recent + merged.favorites).compactMap { $0.image?.assetHash })
+            let backupAssets = hashes.compactMap { all[$0] }
+            try await history.backupSnapshot(merged, assets: backupAssets, to: capacityBackupURL())
+            let bytes = Dictionary(uniqueKeysWithValues: backupAssets.map { ($0.hash, $0.png) })
+            if settings.saveMode != .never, let directory = settings.autoSaveToLocation {
+                let archive = EvictionArchive(directory: directory)
+                if settings.saveForgottenClippings { try archive.save(Array(merged.recent.dropFirst(settings.recentCapacity)), imageAssets: bytes) }
+                if settings.saveForgottenFavorites { try archive.save(Array(merged.favorites.dropFirst(settings.favoriteCapacity)), imageAssets: bytes) }
+            }
+        }
+        return try await FavoriteMutation.perform(repository: repository, operation: {
+            try await self.repository.importSynced(retained, assets: assets, budgetBytes: self.settings.imageStorageLimitMiB * 1024 * 1024)
+        }, persist: { value in
+            if self.settings.saveMode == .afterEachClip { try await self.persist(value) }
+        })
+    }
+    private func capacityBackupURL() throws -> URL {
+        try supportDirectory().appendingPathComponent("History Backups", isDirectory: true)
+            .appendingPathComponent("\(UUID().uuidString)-before-capacity-eviction.json")
     }
 
     private func makeCloudSync() throws -> CloudSyncController {
@@ -370,7 +532,7 @@ import FlycutPlatform
                 self.enqueue(recordForSync: false) { coordinator in
                     guard let cloud = coordinator.cloudSync else { return }
                     let current = try await coordinator.repository.snapshot()
-                    _ = try await cloud.mergeRemote(entries, into: current) { merged in
+                    _ = try await cloud.mergeRemoteApplied(entries, into: current) { merged in
                         try await coordinator.acceptSyncedHistory(merged)
                     }
                 }
@@ -385,6 +547,18 @@ import FlycutPlatform
                 self.settingsStore.save(self.settings)
                 self.settingsEditor?.value.cloudSyncEnabled = false
             }
+        }, imageSyncEnabled: settings.imageSyncEnabled, imageReader: { [repository] hash in try await repository.imageData(for: hash) }, onRemoteImages: { [weak self] envelopes in
+            guard let self else { return }
+            let task = await MainActor.run {
+                self.enqueue(recordForSync: false) { owner in
+                    guard owner.settings.imageSyncEnabled, let cloud = owner.cloudSync else { return }
+                    let current = try await owner.repository.snapshot()
+                    _ = try await cloud.mergeRemoteApplied(envelopes.map(\.entry), into: current) { merged in
+                        try await owner.acceptSyncedHistory(merged, assets: envelopes.compactMap(\.asset))
+                    }
+                }
+            }
+            await task.value
         })
     }
 
@@ -407,10 +581,9 @@ import FlycutPlatform
         let current = try await repository.snapshot()
         if !saved.recent.isEmpty || !saved.favorites.isEmpty || saved.migration != nil {
             guard confirmRecovery(current, saved) else { return (false, nil) }
-            try await repository.replaceAll(saved)
+            try await repository.replaceAll(saved, assets: staging.exportAssets(for: saved))
             _ = try await history.normalizeRecents(backupTo: try deduplicationBackupURL())
-            settings.recentCapacity = max(settings.recentCapacity, saved.recent.count)
-            settings.favoriteCapacity = max(settings.favoriteCapacity, saved.favorites.count)
+            _ = try await history.enforceCapacities(backupTo: capacityBackupURL())
         }
         configure(settings)
         persistence = gate; sessionStartedNever = false; model.storageWarning = nil
@@ -437,10 +610,7 @@ import FlycutPlatform
         if proposed.saveMode != .never {
             let preparation = try await prepareSaving()
             guard preparation.ready else { return "Changes cancelled. Export session history before loading saved history." }
-            if let restored = preparation.restored {
-                proposed.recentCapacity = max(proposed.recentCapacity, restored.recent.count)
-                proposed.favoriteCapacity = max(proposed.favoriteCapacity, restored.favorites.count)
-            }
+
         }
         if proposed.openAtLogin != settings.openAtLogin {
             let status = await login.setEnabled(proposed.openAtLogin)
@@ -458,14 +628,25 @@ import FlycutPlatform
             }
             let cloud = try makeCloudSync()
             let recovered = try await cloud.prepare(try await repository.snapshot(), reauthorize: true)
-            try await repository.replaceAll(recovered)
-            if proposed.saveMode == .afterEachClip { try await persist(recovered) }
-            proposed.recentCapacity = max(proposed.recentCapacity, recovered.recent.count)
-            proposed.favoriteCapacity = max(proposed.favoriteCapacity, recovered.favorites.count)
+            _ = try await acceptSyncedHistory(recovered)
             cloudSync = cloud
         } else if !proposed.cloudSyncEnabled && settings.cloudSyncEnabled {
             await cloudSync?.stop()
             cloudSync = nil
+        }
+        let limitedHistory = HistoryService(repository: repository, recentCapacity: proposed.recentCapacity, favoriteCapacity: proposed.favoriteCapacity,
+                                            archive: proposed.saveMode == .never ? nil : proposed.autoSaveToLocation.map(EvictionArchive.init),
+                                            archiveRecents: proposed.saveForgottenClippings, archiveFavorites: proposed.saveForgottenFavorites)
+        let beforeLimits = try await repository.snapshot()
+        let limitBackup = proposed.saveMode == .never ? nil : try capacityBackupURL()
+        let limited = try await FavoriteMutation.perform(repository: repository, operation: {
+            _ = try await limitedHistory.enforceCapacities(backupTo: limitBackup)
+        }, persist: { value in
+            if proposed.saveMode == .afterEachClip { try await self.persist(value, mode: proposed.saveMode) }
+        })
+        if limited != beforeLimits {
+            snapshot = limited; model.updateSnapshot(limited)
+            if proposed.cloudSyncEnabled { try await cloudSync?.recordLocal(limited) }
         }
         configure(proposed)
         if enablingCloud { try await cloudSync?.activate() }
@@ -478,6 +659,8 @@ import FlycutPlatform
         if let settingsWindow { settingsEditor?.value = settings; settingsWindow.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
         let editor = SettingsModel(settings)
         editor.cloudStatus = cloudStatus
+        editor.checkForUpdates = model.checkForUpdates
+        editor.showSetup = model.showSetup
         editor.cloudSyncNow = { [weak self, weak editor] in
             guard let self, let editor else { return }
             Task {
@@ -541,6 +724,8 @@ import FlycutPlatform
                         let result = try await coordinator.import(source: source, choice: acceptedChoice, persistentSaveMode: acceptedMode, expectedSourceFingerprint: acceptedReport?.sourceFingerprint, expectedDestinationFingerprint: acceptedReport?.destinationFingerprint)
                         _ = try await owner.history.normalizeRecents()
                         var adopted = result.settingsForAdoption(preserving: owner.settings)
+                        adopted.recentCapacity = owner.settings.recentCapacity
+                        adopted.favoriteCapacity = owner.settings.favoriteCapacity
                         adopted.openAtLogin = owner.settings.openAtLogin
                         adopted.appearance = owner.settings.appearance
                         adopted.rememberPause = owner.settings.rememberPause
@@ -549,6 +734,7 @@ import FlycutPlatform
                         adopted.saveForgottenFavorites = owner.settings.saveForgottenFavorites
                         adopted.cloudSyncEnabled = owner.settings.cloudSyncEnabled
                         owner.configure(adopted)
+                        _ = try await owner.history.enforceCapacities(backupTo: owner.settings.saveMode == .never ? nil : owner.capacityBackupURL())
                         if owner.settings.saveMode == .afterEachClip { try await owner.persist(owner.repository.snapshot()) }
                         editor.report = result; editor.complete = true; editor.decision.failed(); editor.error = nil
                         owner.settingsEditor?.value = owner.settings
@@ -557,6 +743,26 @@ import FlycutPlatform
             }
             importWindow = makeWindow(title: "Import Legacy Flycut", view: MigrationView(model: editor))
         } catch { model.message = "Could not open import. Check access to Application Support." }
+    }
+    private func openSetup() {
+        if let setupWindow, setupWindow.isVisible { setupWindow.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        let editor = SetupModel(settings: settings, copySample: { [weak self] in
+            guard let self else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                _ = await paste.copyOrPaste("Flycut plain-text paste test", mode: .copy, previousApp: nil)
+            }
+        }, save: { [weak self] value, state in
+            guard let self else { return }
+            var updated = settings
+            updated.excludedApplications = value.excludedApplications
+            updated.imageCaptureEnabled = value.imageCaptureEnabled
+            updated.imageRecognitionEnabled = value.imageRecognitionEnabled
+            updated.imageSyncEnabled = value.imageSyncEnabled
+            updated.automaticUpdateChecks = value.automaticUpdateChecks
+            configure(updated); settingsStore.saveSetup(state); settingsEditor?.value = settings
+        })
+        setupWindow = makeWindow(title: "Set Up Flycut Evolution", view: SetupView(model: editor, close: { [weak self] in self?.setupWindow?.close() }))
     }
     private func makeWindow<V: View>(title: String, view: V) -> NSWindow {
         let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
@@ -569,7 +775,7 @@ import FlycutPlatform
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminating else { return .terminateLater }
         terminating = true
-        monitor?.stop(); hotkey?.unregister(); pasteTask?.cancel()
+        monitor?.stop(); hotkey?.unregister(); historyHotkey?.unregister(); pasteTask?.cancel()
         let pending = mutationTask
         Task {
             await pending?.value
@@ -583,6 +789,7 @@ import FlycutPlatform
                 sender.reply(toApplicationShouldTerminate: false)
                 monitor.start()
                 if let registeredHotkey { try? hotkey.register(registeredHotkey) }
+                if let registeredHistoryHotkey { try? historyHotkey.register(registeredHistoryHotkey) }
             }
         }
         return .terminateLater

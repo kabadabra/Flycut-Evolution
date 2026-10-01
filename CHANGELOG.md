@@ -1,11 +1,44 @@
 # Changelog
 
-## 1.0.2 (unreleased)
+## 1.0.2 (2026-10-01)
 
-- Close the menu bar palette on outside left, right, and middle clicks, including after a sticky paste.
-- Use plain-text clipboard paste and the destination editor’s normal Paste command for Command+Shift+V. Avoid Accessibility text setters that Teams can report as successful without inserting text.
-- Capture newly copied content before the shortcut strips clipboard formatting, keeping the original clipping available in history.
-- Distinguish user dismissal from closing the palette to begin a paste, so paste preparation does not cancel the request.
+Flycut Evolution 1.0.2 adds faster search and favorite shortcuts, image and file previews, stronger capture controls, and signed update checks. It also fixes plain-text paste in Microsoft Teams, outside-click dismissal, and history limits. Requires macOS 14 or later on Apple Silicon or Intel.
+
+### Find and reuse clippings
+
+- Open history with a configurable **Option–Command–V** shortcut, separate from **Shift–Command–V** plain-text paste.
+- Activate visible entries with **Command–1–9** and assigned favorites with **Option–Command–1–9** while history is open.
+- Search recent clippings and favorites together with exact-first fuzzy matching, highlighted results, and context from long text.
+- Name and edit favorites, reorder them, and assign stable shortcuts. Rename without losing saved content or formatting; conflicting shortcuts are flagged instead of silently assigned.
+- Simplify rows by removing the formatting button, moving favorite stars beside shortcuts, and adding rounded shortcut borders.
+
+### Images and files
+
+- Capture screenshots and copied images with bounded PNG storage, thumbnails, previews, image favorites, and image paste.
+- Show Finder image filenames, the captured image, and full paths in previews. Filename and path text can be selected and copied separately.
+- Retain original file references for other files, showing their names and paths when previews are unavailable. Pasting requires the original files to remain available.
+- Recognize image text locally for search and separate extracted-text copying.
+- Preserve image and file metadata through storage, favorites, backups, and optional private iCloud sync. Image sync requires its own opt-in on each updated Mac; file-reference sync does not upload document contents.
+
+### Privacy, setup, and updates
+
+- Exclude selected applications, ignore the next copy, and pause capture for 5, 15, or 60 minutes. Sensitive clipboard types are filtered before payload reads.
+- Add a dismissible setup walkthrough with shortcut guidance, permission status, and an explicit paste test; reopen it from Settings or the history menu.
+- Add signed update checks with automatic checks off by default. Release downloads include the notarized DMG and a signed updater archive/feed for both CPU architectures.
+
+### Reliability fixes
+
+- Close the palette on outside left, right, and middle clicks, including after a sticky paste.
+- Use the destination editor's normal Paste command for **Shift–Command–V**, fixing cases where Teams reported insertion without actually pasting. Capture the original formatted copy before stripping clipboard formatting.
+- Keep recent and favorite capacities fixed across capture, startup, recovery, import, and sync. Lowering a limit applies immediately and backs up saved history before removing overflow entries.
+- Include PNG bytes in replacement backups, honor export-before-eviction when lowering image budgets, and abort removal if an export fails.
+- Keep unresolved cloud download errors visible across restart and successful uploads; **Sync Now** retries rejected downloads.
+
+### Upgrade notes
+
+- Existing text-only installations keep image capture disabled until you enable it in Images settings. Fresh installations enable image capture and local text recognition.
+- Copy older filename-only entries again to populate image and path details. Screenshots or direct image copies may have no filename or file path.
+- Update all synced Macs to 1.0.2 before relying on image, file, or favorite metadata. File paths from another Mac may not be available locally.
 
 ## 1.0.1 (2026-09-28)
 

@@ -9,6 +9,7 @@ public struct CloudSyncDiskState: Codable, Sendable {
     public var engineState: CKSyncEngine.State.Serialization?
     public var systemFields: [UUID: Data]
     public var lastSuccess: Date?
+    public var unappliedDownloads: Bool?
 
     public init(accountID: String, ledger: CloudSyncLedger,
                 engineState: CKSyncEngine.State.Serialization? = nil,
@@ -18,6 +19,7 @@ public struct CloudSyncDiskState: Codable, Sendable {
         self.engineState = engineState
         self.systemFields = systemFields
         self.lastSuccess = lastSuccess
+        self.unappliedDownloads = nil
     }
 }
 

@@ -2,6 +2,12 @@ import Foundation
 
 /// Decisions that can be made without reading application metadata or writing history.
 public enum CapturePolicy {
+    public static func acceptsBeforeRead(advertisedTypes: [String], sourceBundleIdentifier: String?, settings: FlycutSettings) -> Bool {
+        if let sourceBundleIdentifier, settings.excludedApplications.contains(where: { $0.bundleIdentifier == sourceBundleIdentifier }) { return false }
+        if settings.skipPasswordFields && advertisedTypes.contains("PasswordPboardType") { return false }
+        if settings.skipPasteboardTypes && advertisedTypes.contains(where: Set(settings.skippedPasteboardTypes).contains) { return false }
+        return true
+    }
     public static func accepts(
         text: String,
         advertisedTypes: [String],

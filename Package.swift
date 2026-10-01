@@ -9,11 +9,12 @@ let package = Package(
         .library(name: "FlycutPlatform", targets: ["FlycutPlatform"]),
         .executable(name: "FlycutMac", targets: ["FlycutMac"]),
     ],
+    dependencies: [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")],
     targets: [
         .target(name: "FlycutCore", linkerSettings: [.linkedLibrary("sqlite3")]),
         .target(
             name: "FlycutPlatform",
-            dependencies: ["FlycutCore"],
+            dependencies: ["FlycutCore", .product(name: "Sparkle", package: "Sparkle")],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),
@@ -23,7 +24,7 @@ let package = Package(
                 .linkedLibrary("sqlite3"),
             ]
         ),
-        .executableTarget(name: "FlycutMac", dependencies: ["FlycutCore", "FlycutPlatform"]),
+        .executableTarget(name: "FlycutMac", dependencies: ["FlycutCore", "FlycutPlatform"], linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]),
         .testTarget(name: "FlycutCoreTests", dependencies: ["FlycutCore"], resources: [.copy("Fixtures")]),
         .testTarget(name: "FlycutMacTests", dependencies: ["FlycutMac", "FlycutCore"]),
         .testTarget(name: "FlycutPlatformTests", dependencies: ["FlycutPlatform", "FlycutCore"]),

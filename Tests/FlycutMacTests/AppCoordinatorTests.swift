@@ -67,7 +67,7 @@ import FlycutPlatform
         XCTAssertEqual(AppCoordinator.settingsDomain(for: nil), "com.edynamics.flycut.preview.settings.v3")
     }
 
-    func testApplyingSaveModeKeepsRecoveredCapacityThroughNextCapture() async throws {
+    func testApplyingSaveModeKeepsConfiguredCapacityAndBacksUpRecovery() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let domain = "flycut.synthetic.recovery." + UUID().uuidString
         let defaults = UserDefaults(suiteName: domain)!
@@ -83,18 +83,18 @@ import FlycutPlatform
         })
         var draft = app.settings; draft.saveMode = .onQuit
         _ = try await app.applySettings(draft)
-        XCTAssertEqual(app.settings.recentCapacity, 100)
-        XCTAssertEqual(app.settings.favoriteCapacity, 60)
+        XCTAssertEqual(app.settings.recentCapacity, 40)
+        XCTAssertEqual(app.settings.favoriteCapacity, 40)
         let next = try await app.history.capture(clip(200))
-        XCTAssertEqual(next.recent.count, 100)
-        XCTAssertEqual(next.favorites.count, 60)
+        XCTAssertEqual(next.recent.count, 40)
+        XCTAssertEqual(next.favorites.count, 40)
         // A later, separate capacity edit remains an explicit user choice.
         var reduced = app.settings; reduced.recentCapacity = 50
         _ = try await app.applySettings(reduced)
         XCTAssertEqual(app.settings.recentCapacity, 50)
     }
 
-    func testSyncedHistoryRaisesCapacityBeforeNextCapture() async throws {
+    func testSyncedHistoryKeepsConfiguredCapacityBeforeNextCapture() async throws {
         let domain = "flycut.synthetic.synced-capacity." + UUID().uuidString
         let defaults = UserDefaults(suiteName: domain)!
         defer { defaults.removePersistentDomain(forName: domain) }
@@ -107,10 +107,10 @@ import FlycutPlatform
         try await app.acceptSyncedHistory(synced)
         let next = try await app.history.capture(clip(100))
 
-        XCTAssertEqual(app.settings.recentCapacity, 51)
-        XCTAssertEqual(SettingsStore(defaults: defaults).load().recentCapacity, 51)
-        XCTAssertEqual(next.recent.count, 51)
-        XCTAssertEqual(Set(next.recent.dropFirst().map(\.id)), Set(synced.recent.dropLast().map(\.id)))
+        XCTAssertEqual(app.settings.recentCapacity, 40)
+        XCTAssertEqual(SettingsStore(defaults: defaults).load().recentCapacity, 40)
+        XCTAssertEqual(next.recent.count, 40)
+        XCTAssertEqual(Set(next.recent.dropFirst().map(\.id)), Set(synced.recent.prefix(39).map(\.id)))
     }
 
     func testNeverOnboardingReadsDurableMarkerWithoutRestoringClips() async throws {

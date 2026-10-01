@@ -16,6 +16,7 @@ public enum CloudRecordCodec {
 
     public static func record(for entry: CloudClipEntry, zoneID: CKRecordZone.ID, assetDirectory: URL,
                               baseRecord: CKRecord? = nil) throws -> CKRecord {
+        guard !entry.isImage else { throw CloudRecordError.malformedRecord }
         let id = CKRecord.ID(recordName: entry.id.uuidString, zoneID: zoneID)
         let record = baseRecord?.recordID == id && baseRecord?.recordType == recordType
             ? baseRecord! : CKRecord(recordType: recordType, recordID: id)
@@ -40,11 +41,12 @@ public enum CloudRecordCodec {
         else if let file = (record["payloadAsset"] as? CKAsset)?.fileURL { data = try Data(contentsOf: file) }
         else { throw CloudRecordError.malformedRecord }
         let entry = try JSONDecoder().decode(CloudClipEntry.self, from: data)
+        guard !entry.isImage else { throw CloudRecordError.malformedRecord }
         guard record.recordID.recordName == entry.id.uuidString else { throw CloudRecordError.mismatchedIdentifier }
         return entry
     }
 
-    private static func privateWrite(_ data: Data, to url: URL) throws {
+    static func privateWrite(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])

@@ -4,7 +4,7 @@ import FlycutCore
 @testable import FlycutMac
 
 @MainActor final class PalettePreferencesTests: XCTestCase {
-    func testPreviewLimitNeverHidesSearchOrKeyboardSelection() {
+    func testPreviewLimitNeverHidesSearchOrKeyboardSelection() async {
         let model = PaletteModel()
         var settings = FlycutSettings(); settings.menuPreviewCount = 2
         model.apply(settings)
@@ -15,6 +15,7 @@ import FlycutCore
         XCTAssertEqual(model.visibleClips.last?.id, clips.last?.id)
         model.selection.home()
         model.selection.query = "Synthetic 4"
+        await model.searchTask?.value
         XCTAssertEqual(model.visibleClips.map(\.id), [clips[4].id])
         model.selection.query = ""
         model.showAll = true

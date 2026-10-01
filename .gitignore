@@ -16,3 +16,10 @@ graphify-out/
 *.p8
 *.p12
 *.provisionprofile
+
+# Private signing/fixture artifacts must stay outside source control.
+*.private-key
+*.ed25519-key
+
+# Python helper bytecode
+__pycache__/

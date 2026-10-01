@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 import Darwin
 
-public actor SQLiteHistoryRepository: HistoryRepository {
+public actor SQLiteHistoryRepository: HistoryRepository, ImageAssetRepository {
     nonisolated(unsafe) private let database: OpaquePointer
     private let url: URL?
     private let permissionMaintenance: @Sendable (URL) throws -> Void
@@ -40,25 +40,26 @@ public actor SQLiteHistoryRepository: HistoryRepository {
             try Self.execute(handle, "PRAGMA journal_mode=WAL")
             try Self.execute(handle, "PRAGMA foreign_keys=ON")
             let version = try Self.schemaVersion(handle)
-            guard version <= 2 else { throw HistoryError.unsupportedSchema(version) }
+            guard version <= 5 else { throw HistoryError.unsupportedSchema(version) }
             if version == 0 {
                 try Self.execute(handle, "BEGIN IMMEDIATE")
                 do {
-                    try Self.execute(handle, "CREATE TABLE IF NOT EXISTS clips (id TEXT PRIMARY KEY, text TEXT NOT NULL, pasteboard_type TEXT NOT NULL, source_app_name TEXT, source_bundle_url TEXT, captured_at REAL, collection TEXT NOT NULL CHECK(collection IN ('recent','favorite')), position INTEGER NOT NULL, formatted_rtf BLOB)")
+                    try Self.execute(handle, "CREATE TABLE IF NOT EXISTS clips (id TEXT PRIMARY KEY, text TEXT NOT NULL, pasteboard_type TEXT NOT NULL, source_app_name TEXT, source_bundle_url TEXT, captured_at REAL, collection TEXT NOT NULL CHECK(collection IN ('recent','favorite')), position INTEGER NOT NULL, formatted_rtf BLOB, favorite_metadata BLOB)")
                     try Self.execute(handle, "CREATE INDEX IF NOT EXISTS clips_order ON clips(collection, position)")
                     try Self.execute(handle, "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-                    try Self.execute(handle, "PRAGMA user_version=2")
+                    try Self.execute(handle, "PRAGMA user_version=3")
                     try Self.restrictPermissions(url)
                     try Self.execute(handle, "COMMIT")
                 } catch {
                     try? Self.execute(handle, "ROLLBACK")
                     throw error
                 }
-            } else if version == 1 {
+            } else if version == 1 || version == 2 {
                 try Self.execute(handle, "BEGIN IMMEDIATE")
                 do {
-                    try Self.execute(handle, "ALTER TABLE clips ADD COLUMN formatted_rtf BLOB")
-                    try Self.execute(handle, "PRAGMA user_version=2")
+                    if version == 1 { try Self.execute(handle, "ALTER TABLE clips ADD COLUMN formatted_rtf BLOB") }
+                    try Self.execute(handle, "ALTER TABLE clips ADD COLUMN favorite_metadata BLOB")
+                    try Self.execute(handle, "PRAGMA user_version=3")
                     try Self.restrictPermissions(url)
                     try Self.execute(handle, "COMMIT")
                 } catch {
@@ -67,6 +68,24 @@ public actor SQLiteHistoryRepository: HistoryRepository {
                 }
             } else {
                 try Self.restrictPermissions(url)
+            }
+            if version < 4 {
+                try Self.execute(handle, "BEGIN IMMEDIATE")
+                do {
+                    try Self.execute(handle, "ALTER TABLE clips ADD COLUMN image_metadata BLOB")
+                    try Self.execute(handle, "ALTER TABLE clips ADD COLUMN source_bundle_identifier TEXT")
+                    try Self.execute(handle, "CREATE TABLE image_assets (hash TEXT PRIMARY KEY, png BLOB NOT NULL)")
+                    try Self.execute(handle, "PRAGMA user_version=4")
+                    try Self.execute(handle, "COMMIT")
+                } catch { try? Self.execute(handle, "ROLLBACK"); throw error }
+            }
+            if version < 5 {
+                try Self.execute(handle, "BEGIN IMMEDIATE")
+                do {
+                    try Self.execute(handle, "ALTER TABLE clips ADD COLUMN file_metadata BLOB")
+                    try Self.execute(handle, "PRAGMA user_version=5")
+                    try Self.execute(handle, "COMMIT")
+                } catch { try? Self.execute(handle, "ROLLBACK"); throw error }
             }
         } catch {
             sqlite3_close(handle)
@@ -85,9 +104,13 @@ public actor SQLiteHistoryRepository: HistoryRepository {
         }
         database = handle
         do {
-            try Self.execute(handle, "CREATE TABLE clips (id TEXT PRIMARY KEY, text TEXT NOT NULL, pasteboard_type TEXT NOT NULL, source_app_name TEXT, source_bundle_url TEXT, captured_at REAL, collection TEXT NOT NULL CHECK(collection IN ('recent','favorite')), position INTEGER NOT NULL, formatted_rtf BLOB)")
+            try Self.execute(handle, "CREATE TABLE clips (id TEXT PRIMARY KEY, text TEXT NOT NULL, pasteboard_type TEXT NOT NULL, source_app_name TEXT, source_bundle_url TEXT, captured_at REAL, collection TEXT NOT NULL CHECK(collection IN ('recent','favorite')), position INTEGER NOT NULL, formatted_rtf BLOB, favorite_metadata BLOB)")
             try Self.execute(handle, "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            try Self.execute(handle, "PRAGMA user_version=2")
+            try Self.execute(handle, "ALTER TABLE clips ADD COLUMN image_metadata BLOB")
+            try Self.execute(handle, "ALTER TABLE clips ADD COLUMN source_bundle_identifier TEXT")
+            try Self.execute(handle, "CREATE TABLE image_assets (hash TEXT PRIMARY KEY, png BLOB NOT NULL)")
+            try Self.execute(handle, "ALTER TABLE clips ADD COLUMN file_metadata BLOB")
+            try Self.execute(handle, "PRAGMA user_version=5")
         } catch {
             sqlite3_close(handle)
             throw error
@@ -127,12 +150,13 @@ public actor SQLiteHistoryRepository: HistoryRepository {
             var current = try readSnapshot()
             try body(&current)
             try writeSnapshot(current)
+            try removeUnreferencedAssets()
             return try readSnapshot()
         }
     }
 
     public func replaceAll(_ snapshot: HistorySnapshot) throws {
-        try transaction { try writeSnapshot(snapshot) }
+        try transaction { try writeSnapshot(snapshot); try removeUnreferencedAssets() }
     }
 
     private static func mutate(_ snapshot: inout HistorySnapshot, _ change: HistoryChange) throws {
@@ -199,7 +223,7 @@ public actor SQLiteHistoryRepository: HistoryRepository {
     }
 
     private func insert(_ clip: Clip, position: Int) throws {
-        let statement = try Self.prepare(database, "INSERT INTO clips(id,text,pasteboard_type,source_app_name,source_bundle_url,captured_at,collection,position,formatted_rtf) VALUES(?,?,?,?,?,?,?,?,?)")
+        let statement = try Self.prepare(database, "INSERT INTO clips(id,text,pasteboard_type,source_app_name,source_bundle_url,captured_at,collection,position,formatted_rtf,favorite_metadata,image_metadata,source_bundle_identifier,file_metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
         defer { sqlite3_finalize(statement) }
         try Self.bind(clip.id.uuidString, to: statement, at: 1)
         try Self.bind(clip.text, to: statement, at: 2)
@@ -210,11 +234,19 @@ public actor SQLiteHistoryRepository: HistoryRepository {
         try Self.bind(clip.collection.rawValue, to: statement, at: 7)
         sqlite3_bind_int64(statement, 8, Int64(position))
         try Self.bind(clip.formattedRTF, to: statement, at: 9)
+        try Self.bind(try clip.favoriteMetadata.map { try JSONEncoder().encode($0) }, to: statement, at: 10)
+        try Self.bind(try clip.image.map { try JSONEncoder().encode($0) }, to: statement, at: 11)
+        try Self.bind(clip.sourceBundleIdentifier, to: statement, at: 12)
+        guard clip.files.map({ !$0.isEmpty && $0.count <= 100 }) ?? true else { throw HistoryError.database("Invalid file references") }
+        try Self.bind(try clip.files.map { try JSONEncoder().encode($0) }, to: statement, at: 13)
+        if let image = clip.image {
+            guard image.isValid, try imageByteCount(for: image.assetHash) == image.byteCount else { throw HistoryError.database("Image asset is missing or invalid") }
+        }
         try Self.step(statement, database)
     }
 
     private func readSnapshot() throws -> HistorySnapshot {
-        let statement = try Self.prepare(database, "SELECT id,text,pasteboard_type,source_app_name,source_bundle_url,captured_at,collection,position,formatted_rtf FROM clips ORDER BY collection,position")
+        let statement = try Self.prepare(database, "SELECT id,text,pasteboard_type,source_app_name,source_bundle_url,captured_at,collection,position,formatted_rtf,favorite_metadata,image_metadata,source_bundle_identifier,file_metadata FROM clips ORDER BY collection,position")
         defer { sqlite3_finalize(statement) }
         var recent: [Clip] = []
         var favorites: [Clip] = []
@@ -224,7 +256,7 @@ public actor SQLiteHistoryRepository: HistoryRepository {
             guard result == SQLITE_ROW else { throw HistoryError.database("Unable to read history") }
             guard let idText = Self.text(statement, 0), let id = UUID(uuidString: idText), let text = Self.text(statement, 1), let type = Self.text(statement, 2), let kindText = Self.text(statement, 6), let kind = CollectionKind(rawValue: kindText) else { throw HistoryError.database("Invalid history record") }
             let date = sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))
-            let clip = Clip(id: id, text: text, pasteboardType: type, sourceAppName: Self.text(statement, 3), sourceBundleURL: Self.text(statement, 4), capturedAt: date, collection: kind, order: Int(sqlite3_column_int64(statement, 7)), formattedRTF: Self.blob(statement, 8))
+            let clip = Clip(id: id, text: text, pasteboardType: type, sourceAppName: Self.text(statement, 3), sourceBundleURL: Self.text(statement, 4), capturedAt: date, collection: kind, order: Int(sqlite3_column_int64(statement, 7)), formattedRTF: Self.blob(statement, 8), favoriteMetadata: try Self.blob(statement, 9).map { try JSONDecoder().decode(FavoriteMetadata.self, from: $0) }, image: try Self.blob(statement, 10).map { try JSONDecoder().decode(ClipImage.self, from: $0) }, sourceBundleIdentifier: Self.text(statement, 11), files: try Self.blob(statement, 12).map { try JSONDecoder().decode([ClipFile].self, from: $0) })
             switch kind {
             case .recent: recent.append(clip)
             case .favorite: favorites.append(clip)
@@ -243,6 +275,123 @@ public actor SQLiteHistoryRepository: HistoryRepository {
             throw HistoryError.database("Unable to read migration metadata")
         }
         return HistorySnapshot(recent: recent, favorites: favorites, migration: marker)
+    }
+
+    private func imageByteCount(for hash: String) throws -> Int? {
+        let statement = try Self.prepare(database, "SELECT length(png) FROM image_assets WHERE hash=?")
+        defer { sqlite3_finalize(statement) }
+        try Self.bind(hash, to: statement, at: 1)
+        let status = sqlite3_step(statement)
+        if status == SQLITE_DONE { return nil }
+        guard status == SQLITE_ROW else { throw HistoryError.database("Unable to inspect image asset") }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+    public func imageData(for hash: String) throws -> Data? {
+        let statement = try Self.prepare(database, "SELECT png FROM image_assets WHERE hash=?")
+        defer { sqlite3_finalize(statement) }
+        try Self.bind(hash, to: statement, at: 1)
+        let status = sqlite3_step(statement)
+        if status == SQLITE_DONE { return nil }
+        guard status == SQLITE_ROW else { throw HistoryError.database("Unable to read image asset") }
+        return Self.blob(statement, 0)
+    }
+    private func insertAsset(_ asset: ImageAsset) throws {
+        guard !asset.png.isEmpty, asset.png.count <= 16 * 1024 * 1024 else { throw HistoryError.database("Invalid image asset size") }
+        if let existing = try imageData(for: asset.hash) {
+            guard existing == asset.png else { throw HistoryError.database("Image hash collision") }
+            return
+        }
+        let statement = try Self.prepare(database, "INSERT INTO image_assets(hash,png) VALUES(?,?)")
+        defer { sqlite3_finalize(statement) }
+        try Self.bind(asset.hash, to: statement, at: 1)
+        try Self.bind(asset.png, to: statement, at: 2)
+        try Self.step(statement, database)
+    }
+    public func exportAssets(for snapshot: HistorySnapshot) throws -> [ImageAsset] {
+        try Set((snapshot.recent + snapshot.favorites).compactMap { $0.image?.assetHash }).map { hash in
+            guard let png = try imageData(for: hash) else { throw HistoryError.database("Image asset missing") }
+            return ImageAsset(hash: hash, png: png)
+        }
+    }
+    public func replaceAll(_ snapshot: HistorySnapshot, assets: [ImageAsset], expected: HistorySnapshot? = nil) throws {
+        try transaction {
+            if let expected { guard try readSnapshot() == expected else { throw HistoryError.staleSnapshot } }
+            for asset in assets { try insertAsset(asset) }
+            try writeSnapshot(snapshot); try removeUnreferencedAssets()
+        }
+    }
+    /// Reject an oversized remote collection as a unit. No local eviction means
+    /// a smaller receiver cannot infer and upload deletions on another Mac.
+    public func importSynced(_ snapshot: HistorySnapshot, assets: [ImageAsset], budgetBytes: Int) throws {
+        try transaction {
+            let incoming = Dictionary(assets.map { ($0.hash, $0.png.count) }, uniquingKeysWith: { a, _ in a })
+            let hashes = Set((snapshot.recent + snapshot.favorites).compactMap { $0.image?.assetHash })
+            var total = 0
+            for hash in hashes {
+                guard let count = try incoming[hash] ?? imageByteCount(for: hash) else { throw HistoryError.database("Image asset missing") }
+                total += count
+            }
+            guard total <= budgetBytes else { throw HistoryError.database("Synced images exceed this Mac's storage limit. Increase the image storage limit to receive this collection. Existing history is safe.") }
+            for asset in assets { try insertAsset(asset) }
+            try writeSnapshot(snapshot); try removeUnreferencedAssets()
+        }
+    }
+    public func applyImage(_ asset: ImageAsset, clip: Clip, budgetBytes: Int, recentCapacity: Int = 100_000) throws -> HistorySnapshot {
+        try applyImage(asset, clip: clip, budgetBytes: budgetBytes, recentCapacity: recentCapacity, archive: nil)
+    }
+    public func applyImage(_ asset: ImageAsset, clip: Clip, budgetBytes: Int, recentCapacity: Int, archive: EvictionArchive?) throws -> HistorySnapshot {
+        try transaction {
+            guard clip.image?.assetHash == asset.hash else { throw HistoryError.database("Image identity mismatch") }
+            var snapshot = try readSnapshot()
+            let before = snapshot
+            let sizes = Dictionary((snapshot.recent + snapshot.favorites).compactMap { $0.image }.map { ($0.assetHash, $0.byteCount) }, uniquingKeysWith: { a, _ in a })
+            let evictions = Set(try ImageBudgetPolicy.planEvictions(snapshot: snapshot, assetSizes: sizes, incomingHash: asset.hash, incomingBytes: asset.png.count, budgetBytes: budgetBytes))
+            snapshot.recent.removeAll { evictions.contains($0.id) || ($0.image?.assetHash == asset.hash && $0.sourceBundleIdentifier == clip.sourceBundleIdentifier && $0.files == clip.files) }
+            snapshot.recent.insert(clip, at: 0)
+            if snapshot.recent.count > max(1, recentCapacity) { snapshot.recent = Array(snapshot.recent.prefix(max(1, recentCapacity))) }
+            if let archive {
+                let retained = Set(snapshot.recent.map(\.id))
+                let victims = before.recent.filter { !retained.contains($0.id) && ($0.image?.assetHash != asset.hash || $0.sourceBundleIdentifier != clip.sourceBundleIdentifier || $0.files != clip.files) }
+                var data: [String: Data] = [:]
+                for victim in victims {
+                    if let hash = victim.image?.assetHash { data[hash] = try imageData(for: hash) }
+                }
+                try archive.save(victims, imageAssets: data)
+            }
+            try insertAsset(asset); try writeSnapshot(snapshot); try removeUnreferencedAssets()
+            return try readSnapshot()
+        }
+    }
+    public func trimImageBudget(to budget: Int, archive: EvictionArchive? = nil) throws -> Bool {
+        try transaction {
+            var snapshot = try readSnapshot()
+            let before = snapshot
+            func bytes() -> Int {
+                Dictionary((snapshot.recent + snapshot.favorites).compactMap { $0.image }.map { ($0.assetHash, $0.byteCount) }, uniquingKeysWith: { a, _ in a }).values.reduce(0, +)
+            }
+            while bytes() > budget, let index = snapshot.recent.lastIndex(where: { $0.image != nil }) { snapshot.recent.remove(at: index) }
+            if let archive {
+                let retained = Set(snapshot.recent.map(\.id))
+                let victims = before.recent.filter { !retained.contains($0.id) }
+                var assets: [String: Data] = [:]
+                for victim in victims { if let hash = victim.image?.assetHash { assets[hash] = try imageData(for: hash) } }
+                try archive.save(victims, imageAssets: assets)
+            }
+            try writeSnapshot(snapshot); try removeUnreferencedAssets()
+            return bytes() <= budget
+        }
+    }
+    private func removeUnreferencedAssets() throws {
+        let referenced = Set((try readSnapshot()).recent.compactMap { $0.image?.assetHash } + (try readSnapshot()).favorites.compactMap { $0.image?.assetHash })
+        let statement = try Self.prepare(database, "SELECT hash FROM image_assets")
+        var unused: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW { if let hash = Self.text(statement, 0), !referenced.contains(hash) { unused.append(hash) } }
+        sqlite3_finalize(statement)
+        for hash in unused {
+            let deletion = try Self.prepare(database, "DELETE FROM image_assets WHERE hash=?")
+            defer { sqlite3_finalize(deletion) }
+            try Self.bind(hash, to: deletion, at: 1); try Self.step(deletion, database)
+        }
     }
 
     private static func schemaVersion(_ database: OpaquePointer) throws -> Int {
